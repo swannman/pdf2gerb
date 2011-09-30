@@ -10,40 +10,33 @@
         <div class="container">
         <div class="main">
             <h1>pdf2gerb: Convert PDF to Gerber and NC Drill formats</h1>
-            A few months ago, I had a problem — I wanted to design a printed circuit board in Adobe Illustrator, but also wanted to send it out to <a href="http://www.batchpcb.com/">BatchPCB</a> for manufacturing.  Board houses require that designs be submitted in Gerber format, the creation of which generally requires special CAD software.  At first I thought my only recourse would be to etch the board at home, but I did <a href="http://www.adobe.com/devnet/pdf/pdf_reference.html">a little</a> <a href="http://www.artwork.com/gerber/appl2.htm">research</a> and came to the conclusion that converting PDF files to Gerber format was a viable option.
-
-            After a week of Perl hacking, I had a script that would convert each layer of an uncompressed PDF 1.3 file to its corresponding Gerber and NC Drill files, ready for submission to any PCB manufacturer.  The result is pdf2gerb, which you've found here.
-
-            <h3>How does it work?</h3>
-            It turns out that the PDF description of vector artwork is surprisingly similar to the Gerber representation, and for good reason.  PDF files contain lines of text which move a pen from point to point, drawing lines and changing stroke weights.  Similarly, Gerber files contain lines of text which move a photoplotter head around, exposing lines and changing aperture dimensions.  Converting from one format is simply a matter of understanding the grammar.
-
-            For example, to move to a coordinate (350, 450) in a PDF file, I'd write "350 450 m".  In a Gerber file, I'd write "X350Y450D02".  ".5 w" in a PDF file changes the current stroke weight to .5 points, while "G54D10" in a Gerber file changes the current aperture to a predefined size specified in the header.  By stepping through the PDF file line by line and using regular expressions to match and translate commands between the two grammars, I can build up an equivalent drawing in Gerber format.
-
-            <h3>What about the drill file?</h3>
-            Simply building up a pattern of copper traces only gets us halfway — we still need to tell the manufacturer's CAM hardware where to drill holes for our component leads.  This is done by specifying an <a href="http://www.apcircuits.com/resources/information/nc_introduction.html">NC Drill file</a>, which (like a Gerber file) lists the drill size and coordinates for each hole in our board.
-
-            I've chosen to represent drill holes as solid white circles in Illustrator — they look correct when placed atop solid black circles (which represent solder pads and are converted to plotter flash commands).  Each white circle in the PDF artwork is converted to a correctly-sized drill command in the NC Drill file.
-
-            <h3>How do we handle multiple layers?</h3>
-            Gerber and NC Drill files are created for each layer in the PDF file.  Because manufacturers expect the bottom layer to line up nicely with the top layer, you can create a proper-looking, top-down board in Illustrator and output it directly to Gerber format.
-
-            <h3>An example</h3>
-            Here is a board I designed in Illustrator, converted to Gerber using the pdf2gerb script, and sent off for printing to BatchPCB:
-
-            <div class="photo"><a href="http://swannman.smugmug.com/gallery/2976245#196513727-L-LB"><img src="http://swannman.smugmug.com/photos/196513727-S.jpg" /></a></div>
-
-            To accomplish this, I did the following:
-
-            <ol><li>Did a rough layout of the sketches by hand on graph paper</li>
-                <li>Transferred the sketches into properly-dimensioned layouts in Illustrator
+            <p>I prefer to design circuit board layouts in Adobe Illustrator — it's a familiar tool and I get results quickly.  PCB manufacturers expect designs in Gerber + NC Drill format, however, and the best Illustrator can do is export to PDF.</p>
+            <p>pdf2gerb is a Perl script that converts specially-formatted PDF files to Gerber and NC Drill format.  I used it to order PCB designs from <a href="http://www.batchpcb.com">BatchPCB</a> for my <a href="http://swannman.github.com/povclock">POV clock</a> with great success.</p>
+            <h3>Converting PDF to Gerber</h3>
+            <p>The PDF and Gerber file formats are very similar.  PDF commands move a pen from point to point, drawing lines and changing stroke weights.  Similarly, Gerber commands move a photoplotter head around a circuit board, exposing lines and changing apertures.  The concept is the same but the grammar is different.</p>
+            <p>For example, the PDF command "350 450 m" moves the pen to coordinate (350, 450).  The Gerber equivalent is "X350Y450D02".  ".5 w" changes the PDF stroke weight; "G54D10" changes the Gerber aperture.</p>
+            <p>pdf2gerb reads a PDF file line-by-line, converting each command to its Gerber equivalent.</p>
+            <h3>Converting PDF to NC Drill</h3>
+            <p>An NC (aka Excellon) Drill file specifies drill coordinates and diameters for the circuit board. In my PDF file, I represent each drill hole as a solid white circle placed atop the corresponding solder pad (a solid black circles).</p>
+            <p>pdf2gerb looks for filled white circles in a PDF and outputs their coordinates and diameters as NC Drill commands.</p>
+            <h3>Multi-layer boards</h3>
+            <p>pdf2gerb creates a Gerber and NC Drill file for each layer in the PDF file.  Simply draw the board in Illustrator using multiple layers as though you were looking top-down through the board with x-ray vision.</p>
+            <h3>Example</h3>
+            <p>Here is a double-sided board I drew in Illustrator and converted with pdf2gerb:
+            <div class="photo center"><a href="http://swannman.smugmug.com/2008/Electronics/boardfinal/165623154_Zixr9-L.gif"><img src="http://swannman.smugmug.com/2008/Electronics/boardfinal/165623154_Zixr9-M.gif" /></a></div></p>
+            <p>...and here's the board I received from BatchPCB:
+            <div class="photo center"><a href="http://swannman.smugmug.com/gallery/2976245#196513727-L-LB"><img src="http://swannman.smugmug.com/photos/196513727-M.jpg" /></a></div></p>
+            <p>Here's how I prepared the board — 
+            <ol><li>Did a rough layout of the board on graph paper</li>
+                <li>Redrew the layout in Illustrator:
                 <ul>
                     <li>Created several layers: Top Copper, Bottom Copper, Top Silkscreen, Soldermask, and Drill.</li>
-                    <li>Drew holes in the 'drill' layer as a solid black circle (for the pad) with a solid white circle on top (for the drill location and diameter)</li>
-                    <li>Used the pen tool on the Top and Bottom layers to connect pads with appropriately-weighted traces</li>
+                    <li>Drew holes in the Drill layer as a solid black circle (for the pad) with a solid white circle on top (for the drill location and diameter)</li>
+                    <li>Used the pen tool on the Top and Bottom layers to add traces between pads</li>
                     <li>Drew solid black circles in the Soldermask layer to cover each pad</li>
                     <li>Drew a rectangle around the board in the Silkscreen layer</li></ul></li>
-                <li>Copied the Drill layer into both top and bottom layers (which may not have been necessary)</li>
-                <li>Saved the document as a copy in PDF format
+                <li>Copied the Drill layer into top and bottom layers (may not have been necessary)</li>
+                <li>Exported the layout in PDF format:
                 <ul>
                     <li>Selected PDF 1.3 format</li>
                     <li>Unchecked "Preserve Illustrator Editing Capabilities"</li>
@@ -55,19 +48,14 @@
                 <li>Submitted the .zip file to BatchPCB</li>
             </ol>
              
-            <br />
-            You can download a .zip containing the files from each step <a href="https://github.com/swannman/pdf2gerb/raw/master/examples/pdf2gerb_example.zip">here</a>.
-
+            You can download the files from this project <a href="https://github.com/swannman/pdf2gerb/raw/master/examples/pdf2gerb_example.zip">here</a>.</p>
+            <h3>Usage</h3>
+            <p>Download the script <a href="https://raw.github.com/swannman/pdf2gerb/master/pdf2gerb.pl">here.</a>  Right-click on the download link and save it to your computer.  Open a Terminal window, navigate to the file you downloaded, and type <span class="code">chmod 755 pdf2gerb.pl</span> to make it executable.</p>
+            <p>To use pdf2gerb, type <span class="code">./pdf2gerb.pl /path/to/circuit.pdf</span>.  Gerber and NC Drill files will be output to the same location as the PDF file.</p>
             <h3>Support, licensing, and caveats</h3>
-            pdf2gerb is licensed as open-source under the <a href="http://www.gnu.org/licenses/gpl-3.0.txt">GNU GPL 3.0</a>.  Source code is available at <a href="http://github.com/swannman/pdf2gerb">GitHub</a>.
-
-            <h3>Where do I download pdf2gerb?</h3>
-            You can download the script <a href="https://raw.github.com/swannman/pdf2gerb/master/pdf2gerb.pl">here.</a>  Right-click on the download link and choose "Save Linked File As...", then save it do the desktop.  Next, open a Terminal window, navigate to the desktop folder, and type 'chmod 755 pdf2gerb.pl' to mark it as an executable file.
-
-            To use pdf2gerb, navigate to the directory that contains it and type './pdf2gerb.pl /path/to/circuit.pdf'.  Gerber and drill files will be output to the PDF file directory.
-
+            <p>pdf2gerb is released as open-source software under the <a href="http://www.gnu.org/licenses/gpl-3.0.txt">GNU GPL 3.0</a>.  Source code is available at <a href="http://github.com/swannman/pdf2gerb">GitHub</a>.</p>
             <h3>Contact</h3>
-            <p>If you've tried pdf2gerb and have comments, suggestions, or issues — or if you used it to build something cool — I'd love to hear from you.  Email me at <a href="mailto:swannman@mac.com?subject=pdf2gerb">swannman@mac.com</a>.</p>
+            <p>If you've tried pdf2gerb and have comments, suggestions, or issues — or if you used it to build something cool — send me an email at <a href="mailto:swannman@mac.com?subject=pdf2gerb">swannman@mac.com</a>.</p>
     </div>
     <div class="right">
         <div class="highlightbox">
