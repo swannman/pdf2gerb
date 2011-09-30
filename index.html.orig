@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<<<<<<< HEAD
+    <head>
+        <meta charset='utf-8'>
+        <title>pdf2gerb: Convert PDF to Gerber and NC Drill formats</title>
+        <link rel="stylesheet" href="/project.css" type="text/css">
+    </head>
+
+    <body>
+        <div class="container">
+        <div class="main">
+            <h1>pdf2gerb: Convert PDF to Gerber and NC Drill formats</h1>
+            A few months ago, I had a problem — I wanted to design a printed circuit board in Adobe Illustrator, but also wanted to send it out to <a href="http://www.batchpcb.com/">BatchPCB</a> for manufacturing.  Board houses require that designs be submitted in Gerber format, the creation of which generally requires special CAD software.  At first I thought my only recourse would be to etch the board at home, but I did <a href="http://www.adobe.com/devnet/pdf/pdf_reference.html">a little</a> <a href="http://www.artwork.com/gerber/appl2.htm">research</a> and came to the conclusion that converting PDF files to Gerber format was a viable option.
+
+            After a week of Perl hacking, I had a script that would convert each layer of an uncompressed PDF 1.3 file to its corresponding Gerber and NC Drill files, ready for submission to any PCB manufacturer.  The result is pdf2gerb, which you've found here.
+
+            <h3>How does it work?</h3>
+            It turns out that the PDF description of vector artwork is surprisingly similar to the Gerber representation, and for good reason.  PDF files contain lines of text which move a pen from point to point, drawing lines and changing stroke weights.  Similarly, Gerber files contain lines of text which move a photoplotter head around, exposing lines and changing aperture dimensions.  Converting from one format is simply a matter of understanding the grammar.
+
+            For example, to move to a coordinate (350, 450) in a PDF file, I'd write "350 450 m".  In a Gerber file, I'd write "X350Y450D02".  ".5 w" in a PDF file changes the current stroke weight to .5 points, while "G54D10" in a Gerber file changes the current aperture to a predefined size specified in the header.  By stepping through the PDF file line by line and using regular expressions to match and translate commands between the two grammars, I can build up an equivalent drawing in Gerber format.
+
+            <h3>What about the drill file?</h3>
+            Simply building up a pattern of copper traces only gets us halfway — we still need to tell the manufacturer's CAM hardware where to drill holes for our component leads.  This is done by specifying an <a href="http://www.apcircuits.com/resources/information/nc_introduction.html">NC Drill file</a>, which (like a Gerber file) lists the drill size and coordinates for each hole in our board.
+
+            I've chosen to represent drill holes as solid white circles in Illustrator — they look correct when placed atop solid black circles (which represent solder pads and are converted to plotter flash commands).  Each white circle in the PDF artwork is converted to a correctly-sized drill command in the NC Drill file.
+
+            <h3>How do we handle multiple layers?</h3>
+            Gerber and NC Drill files are created for each layer in the PDF file.  Because manufacturers expect the bottom layer to line up nicely with the top layer, you can create a proper-looking, top-down board in Illustrator and output it directly to Gerber format.
+
+            <h3>An example</h3>
+            Here is a board I designed in Illustrator, converted to Gerber using the pdf2gerb script, and sent off for printing to BatchPCB:
+
+            <div class="photo"><a href="http://swannman.smugmug.com/gallery/2976245#196513727-L-LB"><img src="http://swannman.smugmug.com/photos/196513727-S.jpg" /></a></div>
+
+            To accomplish this, I did the following:
+
+            <ol><li>Did a rough layout of the sketches by hand on graph paper</li>
+                <li>Transferred the sketches into properly-dimensioned layouts in Illustrator
+                <ul>
+                    <li>Created several layers: Top Copper, Bottom Copper, Top Silkscreen, Soldermask, and Drill.</li>
+                    <li>Drew holes in the 'drill' layer as a solid black circle (for the pad) with a solid white circle on top (for the drill location and diameter)</li>
+                    <li>Used the pen tool on the Top and Bottom layers to connect pads with appropriately-weighted traces</li>
+                    <li>Drew solid black circles in the Soldermask layer to cover each pad</li>
+                    <li>Drew a rectangle around the board in the Silkscreen layer</li></ul></li>
+                <li>Copied the Drill layer into both top and bottom layers (which may not have been necessary)</li>
+                <li>Saved the document as a copy in PDF format
+                <ul>
+                    <li>Selected PDF 1.3 format</li>
+                    <li>Unchecked "Preserve Illustrator Editing Capabilities"</li>
+                    <li>Unchecked "Embed Page Thumbnails"</li>
+                    <li>On the Compression page, unchecked "Compress Text and Line Art"</li></ul></li>
+                <li>Ran 'pdf2gerb.pl /path/to/circuit.pdf'</li>
+                <li>Renamed 'Top Copper.drd' to 'Drill.drd'</li>
+                <li>Made a .zip file of Top Copper.grb, Bottom Copper.grb, Top Silkscreen.grb, Soldermask.grb, and Drill.drd</li>
+                <li>Submitted the .zip file to BatchPCB</li>
+            </ol>
+             
+            <br />
+            You can download a .zip containing the files from each step <a href="https://github.com/swannman/pdf2gerb/raw/master/examples/pdf2gerb_example.zip">here</a>.
+
+            <h3>Support, licensing, and caveats</h3>
+            pdf2gerb is licensed as open-source under the <a href="http://www.gnu.org/licenses/gpl-3.0.txt">GNU GPL 3.0</a>.  Source code is available at <a href="http://github.com/swannman/pdf2gerb">GitHub</a>.
+
+            <h3>Where do I download pdf2gerb?</h3>
+            You can download the script <a href="https://raw.github.com/swannman/pdf2gerb/master/pdf2gerb.pl">here.</a>  Right-click on the download link and choose "Save Linked File As...", then save it do the desktop.  Next, open a Terminal window, navigate to the desktop folder, and type 'chmod 755 pdf2gerb.pl' to mark it as an executable file.
+
+            To use pdf2gerb, navigate to the directory that contains it and type './pdf2gerb.pl /path/to/circuit.pdf'.  Gerber and drill files will be output to the PDF file directory.
+
+            <strong>Update:</strong> pdf2gerb has been updated to version 1.1 and now supports PDF output from Illustrator CS3, which frequently uses the <em>cm</em> command to transform the coordinate plane. It also approximates bezier curves as two straight lines rather than ignoring them.
+
+            <strong>Update 2:</strong> pdf2gerb 1.2 is now available with support for users who, due to application limitations, cannot output filled circles in their PDF.  pdf2gerb will now turn stroked circles into a drill hole and copper pad as shown in <a href="https://github.com/swannman/pdf2gerb/raw/master/turbocad_strokemode.png">this diagram</a>.  Note that the stacked-filled-circles approach is still preferred, as it gives you the most control over hole and pad size.
+
+            <strong>Update 3:</strong> pdf2gerb 1.3 is now available and supports some forms of bezier curve — specifically the 'v' and 'y' operators.  Download an example file with supported curves <a href="http://github.com/swannman/pdf2gerb/raw/master/examples/pdf2gerb_curve_test.zip">here.</a>
+
+            <strong>Update 3:</strong> pdf2gerb 1.4 is now available with better support for CMYK input files.  It also outputs drill files in decimal format (no leading/trailing zeroes suppression) so that the file is easier to parse by PCB houses and viewer software.
+    </div>
+    <div class="right">
+        <div class="highlightbox">
+            <a href="http://github.com/swannman/pdf2gerb/">Browse project files</a><br/>
+            <a href="http://github.com/swannman/pdf2gerb/zipball/master">Download project files (.zip)</a><br/>
+            <a href="mailto:swannman@mac.com?subject=pdf2gerb">Email the author</a></br>
+        </div>
+    </div>
+    </div>
+=======
+<head>
+  <meta charset='utf-8'>
+
+  <title>swannman/pdf2gerb @ GitHub</title>
+
+  <style type="text/css">
+    body {
+      margin-top: 1.0em;
+      background-color: #ea076b;
+      font-family: Helvetica, Arial, FreeSans, san-serif;
+      color: #ffffff;
+    }
+    #container {
+      margin: 0 auto;
+      width: 700px;
+    }
+    h1 { font-size: 3.8em; color: #15f894; margin-bottom: 3px; }
+    h1 .small { font-size: 0.4em; }
+    h1 a { text-decoration: none }
+    h2 { font-size: 1.5em; color: #15f894; }
+    h3 { text-align: center; color: #15f894; }
+    a { color: #15f894; }
+    .description { font-size: 1.2em; margin-bottom: 30px; margin-top: 30px; font-style: italic;}
+    .download { float: right; }
+    pre { background: #000; color: #fff; padding: 15px;}
+    hr { border: 0; width: 80%; border-bottom: 1px solid #aaa}
+    .footer { text-align:center; padding-top:30px; font-style: italic; }
+  </style>
+</head>
+
+<body>
+  <a href="http://github.com/swannman/pdf2gerb"><img style="position: absolute; top: 0; right: 0; border: 0;" src="http://s3.amazonaws.com/github/ribbons/forkme_right_darkblue_121621.png" alt="Fork me on GitHub" /></a>
+
+  <div id="container">
+
+    <div class="download">
+      <a href="http://github.com/swannman/pdf2gerb/zipball/master">
+        <img border="0" width="90" src="http://github.com/images/modules/download/zip.png"></a>
+      <a href="http://github.com/swannman/pdf2gerb/tarball/master">
+        <img border="0" width="90" src="http://github.com/images/modules/download/tar.png"></a>
+    </div>
+
+    <h1><a href="http://github.com/swannman/pdf2gerb">pdf2gerb</a>
+      <span class="small">by <a href="http://github.com/swannman">swannman</a></span></h1>
+
+    <div class="description">
+      Perl script converts PDF files to Gerber format
+    </div>
+
+    <h2>Authors</h2>
+<p>Matt Swann (swannman@mac.com)<br/><br/>      </p>
+<h2>Contact</h2>
+<p>Matt Swann (swannman@mac.com)<br/>      </p>
+
+
+    <h2>Download</h2>
+    <p>
+      You can download this project in either
+      <a href="http://github.com/swannman/pdf2gerb/zipball/master">zip</a> or
+      <a href="http://github.com/swannman/pdf2gerb/tarball/master">tar</a> formats.
+    </p>
+    <p>You can also clone the project with <a href="http://git-scm.com">Git</a>
+      by running:
+      <pre>$ git clone git://github.com/swannman/pdf2gerb</pre>
+    </p>
+
+    <div class="footer">
+      get the source code on GitHub : <a href="http://github.com/swannman/pdf2gerb">swannman/pdf2gerb</a>
+    </div>
+
+  </div>
+
+  
+>>>>>>> bb2bae33156e65d605e40f3d0984aac0474b37f3
+</body>
+</html>
