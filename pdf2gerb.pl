@@ -22,6 +22,9 @@
 # 1.6      5/5/12   DJ   misc fixes, released for testing
 # 1.6a     5/6/12   DJ   trim panel overhangs even with 1 x 1 (by default), added some pad/hole sizes, allow rotated PDFs (landscape prints), allow x + y pad around panelization
 # 1.6b     5/21/12  DJ   pre-scan multiple layers for PCB outline, don't use clip rect for outline, generate drill file on any layer (for Matt's test file)
+# 1.6c     1/7/13   DJ   initialize visibility to Tristate value so both holes + pads will be recognized if no fill/stroke color set in PDF, treat singleton layer as copper, not silk
+# 1.6d     1/30/13  DJ   insert dummy G54D10 command at start, in case there are no traces (avoids ViewPlot D00 message for outline file)
+# 1.6e     2/1/13   DJ   added DRILL_FMT to allow 2.3 or 2.4 drill format, show version# in output files
 #
 # TODO maybe:
 # -elliptical pads? (draw short line seg using round aperture)
@@ -92,20 +95,22 @@ use List::Util qw[min max];
 
 
 #just a little warning; set realistic expectations:
-print "Pdf2Gerb.pl 1.6\nThis is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!\n\n";
+use constant VERSION => '1.6e';
+printf "Pdf2Gerb.pl %s\nThis is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!\n\n", VERSION;
 
 #Perl constants can supposedly be optimized at compile time, so here are some:
-use constant { TRUE => 1, FALSE => 0 };
+use constant { TRUE => 1, FALSE => 0, MAYBE => 2 }; #tri-state values
 use constant { MININT => - 2 ** 31 - 1, MAXINT => 2 ** 31 - 1}; #big enough for simple arithmetic purposes
 use constant { K => 1024, M => 1024 * 1024 }; #used for more concise display of numbers
 use constant PI => 4 * atan2(1, 1); #used for circumference calculations
 
 use constant METRIC => FALSE; #set to TRUE for metric units (only affect final numbers in output files, not internal arithmetic)
 use constant APERTURE_LIMIT => 0; #34; #generate warnings if too many apertures are used (0 to not check)
+use constant DRILL_FMT => '2.4'; #'2.3'; #'2.4' is the default for PCB fab; change to '2.3' for CNC
 
 use constant WANT_DEBUG => 0; #10; #level of debug wanted; higher == more, lower == less, 0 == none
 use constant GERBER_DEBUG => 0; #level of debug to include in Gerber file; DON'T USE FOR FABRICATION
-use constant WANT_STREAMS => FALSE; #save decompressed streams to files (for debug)
+use constant WANT_STREAMS => TRUE; #FALSE; #save decompressed streams to files (for debug)
 
 DebugPrint(sprintf("DEBUG LEVEL: stdout %d, gerber %d, want streams? %d\n", WANT_DEBUG, GERBER_DEBUG, WANT_STREAMS), 1);
 #DebugPrint(sprintf("max int = %d, min int = %d\n", MAXINT, MININT), 1); 
@@ -296,7 +301,8 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     our $currentDrillAperture = "";
     our $lastStrokeWeight = 1; #default to 1 point
     #remember stroke vs. fill colors separately:
-    our %visibleFillColor = ('f' => TRUE, 's' => TRUE); #0 == white (hidden), !0 == !white (visible)
+#    our %visibleFillColor = ('f' => TRUE, 's' => TRUE); #0 == white (hidden), !0 == !white (visible)
+    our %visibleFillColor = ('f' => MAYBE, 's' => TRUE); #0 == white (hidden), !0 == !white (visible)
     our $layerPolarity = TRUE; #remember last LPD/LPC emitted; initial default = visible
     our ($startPositionX, $startPositionY) = (0, 0); #remember subpath start in case path needs to be closed again later (sometimes needed)
     our ($currentX, $currentY) = (0, 0); #current location in subpath
@@ -330,7 +336,8 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     DebugPrint(sprintf("body length: %.0fK, drill body len: %.0fK\n", length($body)/K, length(join("", values %drillBody))/K), 2);
 
     #generate output files:
-    if ($currentLayer + 1 == scalar(@layerTitles)) { copper("silk"); } #assume LAST layer is silk screen
+#    if ($currentLayer + 1 == scalar(@layerTitles)) { copper("silk"); } #assume LAST layer is silk screen
+    if ($currentLayer && ($currentLayer + 1 == scalar(@layerTitles))) { copper("silk"); } #assume LAST layer is silk screen if not also first layer
     else #top and bottom copper
     {
         copper("copper");
@@ -992,7 +999,8 @@ sub fill
                 $body .= sprintf("X%sY%sD03*\n", inchesX(($minX + $maxX)/2, FALSE), inchesY(($minY + $maxY)/2, FALSE)); #move and flash
                 DebugPrint(sprintf("flash rect: use aperture $lastAperture %5.5f \"$w\" at (%5.5f, %5.5f), has mask? %d\n", inches($w), inchesX(($minX + $maxX)/2), inchesY(($minY + $maxY)/2), $visibleFillColor{'f'}), 5);
             }
-            if ($visibleFillColor{'f'}) #generate mask for this pad
+#            if ($visibleFillColor{'f'}) #generate mask for this pad
+            if ($visibleFillColor{'f'} != FALSE) #generate mask for this pad
             {
                 my $mask = sprintf("%d,%d\n", $aper_size + SOLDER_MARGIN, $aper_size + SOLDER_MARGIN); #add .012" to pad size for mask
                 $mask .= substr($body, $masklen); #pad commands are re-used to draw mask
@@ -1037,7 +1045,8 @@ sub fill
     if ($drawPath[-1] eq "circle") #fill a circle; NOTE: might be round pad or hole
     {
         my ($centerX, $centerY, $diameter, $drillxy) = ($drawPath[-5], $drawPath[-4], $drawPath[-3], sprintf("X%sY%s", inchesX($drawPath[-5], FALSE), inchesY($drawPath[-4], FALSE)));
-        my $ishole = ((!MAX_DRILL || (inches($diameter + HOLE_ADJUST) <= MAX_DRILL)) && !$visibleFillColor{'f'}); #small and not visible; this is probably a drill hole
+#        my $ishole = ((!MAX_DRILL || (inches($diameter + HOLE_ADJUST) <= MAX_DRILL)) && !$visibleFillColor{'f'}); #small and not visible; this is probably a drill hole
+        my $ishole = ((!MAX_DRILL || (inches($diameter + HOLE_ADJUST) <= MAX_DRILL)) && ($visibleFillColor{'f'} != TRUE)); #small and not visible; this is probably a drill hole
         $diameter += $ishole? HOLE_ADJUST: RNDPAD_ADJUST; #compensate for rendering arithmetic errors
         DebugPrint(sprintf("fill circle: center (%4.4f, %4.4f) \"$drawPath[-5] $drawPath[-4]\", diameter %5.5f (adjusted to %5.5f), weight $lastStrokeWeight, vis-f $visibleFillColor{'f'}, use aperture? %d, to drill? %d, prev drill? %d\n", inchesX($centerX), inchesY($centerY), inches($drawPath[-3]), inches($diameter), inches($diameter) <= MAX_APERTURE, $ishole, exists($holes{$drillxy})), 5);
         if (exists($holes{$drillxy})) #undo any previous (larger) drill hole at this location before drilling new (smaller) hole
@@ -1066,7 +1075,8 @@ sub fill
             SetAperture('p', $diameter); # - $lastStrokeWeight/2); #stroke is centered on circumference
             my $masklen = length($body);
             $body .= sprintf("X%sY%sD03*\n", inchesX($centerX, FALSE), inchesY($centerY, FALSE)); #move + flash
-            if ($visibleFillColor{'f'}) #generate mask for this pad
+#            if ($visibleFillColor{'f'}) #generate mask for this pad
+            if ($visibleFillColor{'f'} != FALSE) #generate mask for this pad
             {
                 my $mask = sprintf("%d\n", $diameter + SOLDER_MARGIN); #add .012" to pad size
                 $mask .= substr($body, $masklen); #pad commands are re-used to draw mask
@@ -1482,7 +1492,7 @@ sub copper
     # Leading zero suppression, absolute coordinates, format=2.4
     # (Seems like this should be NO zero suppression, but doesn't validate
     # correctly otherwise.)
-    my $header = sprintf("G04 Pdf2Gerb 1.6: $layerTitles[$currentLayer] at %s *\n", scalar localtime); #show when/how created
+    my $header = sprintf("G04 Pdf2Gerb %s: $layerTitles[$currentLayer] at %s *\n", VERSION, scalar localtime); #show when/how created
     $header .= "%FSLAX24Y24*%\n"; #2.4 format, absolute, no decimal
     #even though solder mask is inverted, it looks like we don't need to set it that way?
     $header .= "%IPPOS*%\n"; #image polarity; always use positive, even for solder masks?
@@ -1507,6 +1517,7 @@ sub copper
     }
 
     $header .= "G01*\n"; #moved to here; must be last command before body
+    $header .= "G54D10*\n"; #select tool in case there are no traces (avoids ViewPlot D00 message for outline file)
     $body = Panelize($body); #apply panelization
     $body .= "M02*\n"; #moved to here; must be last command
 
@@ -1583,8 +1594,8 @@ sub drill
         return;
     }
 
-    # Write the drill header, format=2.3
-    my $drillHeader = sprintf("G04 Pdf2Gerb 1.6: $layerTitles[$currentLayer] at %s *\n", scalar localtime); #show when/how created
+    # Write the drill header, format=2.3 or 2.4
+    my $drillHeader = sprintf("G04 Pdf2Gerb %s (%s fmt): $layerTitles[$currentLayer] at %s *\n", VERSION, DRILL_FMT, scalar localtime); #show when/how created
     $drillHeader .= "%\nM48\nM72\n"; #moved from above
 #??    $drillHeader = "%FSLAX24Y24*%\n" . $drillHeader; #make it 2.4, absolute, no decimal
 
@@ -1601,6 +1612,31 @@ sub drill
     }
     $drillHeader .= "%\n";
     $body = Panelize($body); #apply panelization
+#convert drill 2.4 to 2.3 format:
+#do this *after* Panelize, otherwise x/y panelization will be messed up
+#does this only need to be done for drill file?
+    if (DRILL_FMT eq '2.3')
+    {
+        my @xylines = split /\n/, $body;
+        foreach my $xyline (@xylines) #adjust all X + Y coordinates
+        {
+            if ($xyline =~ m/X(-?\d+)/g)
+            {
+                my ($stofs, $enofs, $xval) = ($-[0], $+[0], $1/10000);
+                $xval = sprintf("X%06.3f", $xval);
+                $xval =~ s/\.//;
+                $xyline = substr($xyline, 0, $stofs) . $xval . substr($xyline, $enofs);
+            }
+            if ($xyline =~ m/Y(-?\d+)/g)
+            {
+                my ($stofs, $enofs, $yval) = ($-[0], $+[0], $1/10000);
+                $yval = sprintf("Y%06.3f", $yval);
+                $yval =~ s/\.//;
+                $xyline = substr($xyline, 0, $stofs) . $yval . substr($xyline, $enofs);
+            }
+        }
+        $body = join("\n", @xylines). "\n";
+    }
     $body .= "T00\nM30\n"; #moved to here; must be last command
 
     my $filename = "$layerTitles[$currentLayer]-drill(DRD).txt";
@@ -1612,6 +1648,7 @@ sub drill
     DebugPrint(sprintf("wrote %d bytes header + %d bytes drill body to $filename\n", length($drillHeader), length($body)), 2);
     $did_drill = TRUE;
 }
+
 
 #apply panelization:
 #The code below just updates the final results with updated coordinates because this feature was an after-thought.
