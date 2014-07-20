@@ -1,5 +1,8 @@
 //overlay ruler grid onto PDF doc
 //Copyright 2014 djulien17@thejuliens.net.  All rights reserved.
+//to use: copy to Adobe scripts folder, then open PDF in Adobe Reader or Acrobat and click the XY grid button
+//
+
 //
 //<AcroButtons name="showXY" version="2.0" "modified="7/18/2014 11:25:27" id="7:18:2014:11:25:27">
 // This script was created by AcroButtons from Windjack Solutions, www.windjack.com
