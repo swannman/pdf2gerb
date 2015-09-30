@@ -29,6 +29,7 @@
 # 1.6g     3/28/13  GDM/DJ implement gray space drawing attr; change "\1" to "$1" to prevent perl warning; substitute circles for clip rects (SUBST_CIRCLE_CLIPRECT)
 # 1.6h     4/11/13  DJ   allow \r\n between "<<" and "/FlateDecode"; make \n optional between commands; join commands that are split across lines; added more debug; force input to Unicode
 # 1.6i     7/14/14  DJ   avoid /0 error for nudge line segment or polygon edge, avoid infinite loops for outline/fill unknown shapes, fix handling of 2 adjacent polygon edges parallel (shouldn't happen, though)
+# 1.6j     9/30/15  DJ   fix an additional subscript error; perl short-circuit IF doesn't seem to be working
 #
 # TODO maybe:
 # -elliptical pads? (draw short line seg using round aperture)
@@ -98,7 +99,7 @@ use Encode; #::Detect::Detector; #for detecting charset encoding
 ##sub min;
 ##sub max;
 
-use constant VERSION => '1.6h';
+use constant VERSION => '1.6j';
 #just a little warning; set realistic expectations:
 printf "Pdf2Gerb.pl %s\nThis is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!\n\n", VERSION;
 
@@ -347,7 +348,7 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
         if (subpaths()) { next; }
         if (drawshapes()) { next; }
         #contact the authors if any others are important for your PCB
-        mywarn(sprintf("ignored: line# $currentLine/%d $line\n", scalar(@lines)));
+        mywarn(sprintf("ignored: line# $currentLine/%d", scalar(@lines)) . "$line\n");
     }
     $totalLines += $currentLine;
     refillholes(); #undo unneeded holes
@@ -1253,6 +1254,7 @@ sub reduceRect
 {
     our @drawPath; #globals
 
+    if (scalar(@drawPath) < 2) { return FALSE; } #avoid subscript error (short-circuit IF doesn't work); is this a bug?
     if ((scalar(@drawPath) < 2) || ($drawPath[-1] ne "line") || ($drawPath[-2] < 3)) { DebugPrint(sprintf("non-rect: %d, %s, %d\n", scalar(@drawPath), $drawPath[-1], $drawPath[-2]), 5); return FALSE; } #subpath doesn't contain 4 line segments
 #    if ((scalar(@drawPath) < 2) || ($drawPath[-1] ne "line") || ($drawPath[-2] < 3)) { return FALSE; } #subpath doesn't contain 4 line segments
 
