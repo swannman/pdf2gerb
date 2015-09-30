@@ -28,6 +28,7 @@
 # 1.6f     3/21/13  DJ   made \n after "stream" optional (newer PDFCreator omits it?); default WANT_STREAMS to FALSE; extract max 100 streams (for safety); use REDUCE_TOLERANCE const for adjustable tolerance on reduce logic
 # 1.6g     3/28/13  GDM/DJ implement gray space drawing attr; change "\1" to "$1" to prevent perl warning; substitute circles for clip rects (SUBST_CIRCLE_CLIPRECT)
 # 1.6h     4/11/13  DJ   allow \r\n between "<<" and "/FlateDecode"; make \n optional between commands; join commands that are split across lines; added more debug; force input to Unicode
+# 1.6i     7/14/14  DJ   avoid /0 error for nudge line segment or polygon edge, avoid infinite loops for outline/fill unknown shapes, fix handling of 2 adjacent polygon edges parallel (shouldn't happen, though)
 #
 # TODO maybe:
 # -elliptical pads? (draw short line seg using round aperture)
@@ -845,7 +846,9 @@ sub drawshapes
         while (scalar(@drawPath)) #draw all subpaths that are waiting
         {
             outline();
-            popshape();
+            if (popshape()) { next; }
+            DebugPrint("failed to outline subpath\n", 5);
+            @drawPath = ();
         }
         return TRUE;
     }
@@ -860,7 +863,9 @@ sub drawshapes
         while (scalar(@drawPath)) #fill all subpaths that are waiting
         {
             fill();
-            popshape();
+            if (popshape()) { next; }
+            DebugPrint("failed to fill subpath\n", 5);
+            @drawPath = ();
         }
         return TRUE;
     }
@@ -908,10 +913,11 @@ sub outline
 #                my $slope = $deltaX? $deltaY/$deltaX: MAXINT;
                 #first pick a test point near the center of but not on this edge:
                 my $edgelen = sqrt($deltaX **2 + $deltaY **2);
+                if ($edgelen < 0.00001) { DebugPrint(sprintf("no edge delta? (%5.5f, %5.5f) - (%5.5f, %5.5f)", $drawPath[$j + 0], $drawPath[$j + 2], $drawPath[$j + 1], $drawPath[$j + 3]), 5); next; }
                 my ($testX, $testY) = ($midX - $deltaY * $ofs / $edgelen, $midY + $deltaX * $ofs / $edgelen); #move a short distance perpendicular to center of polygon's edge
                 #then check whether test point is inside or outside the polygon:
                 #The code below is based on the point-in-polygon algorithm described at http://alienryderflex.com/polygon/
-                $inside{$j} = +$ofs; #assume outside for now; <0 => insidee, >0 => outside
+                $inside{$j} = +$ofs; #assume outside for now; <0 => inside, >0 => outside
                 for (my $i = -6 * $drawPath[-2]; $i < 0; $i += 6)
                 {
                     if ((min($drawPath[$i + 1], $drawPath[$i + 3]) >= $testY) || (max($drawPath[$i + 1], $drawPath[$i + 3]) < $testY)) { next; } #polygon side doesn't cross test point
@@ -931,6 +937,7 @@ sub outline
                 my ($svx0, $svy0, $svx1, $svy1) = ($drawPath[$i + 0], $drawPath[$i + 1], $drawPath[$i + 2], $drawPath[$i + 3]);
                 my ($deltaX, $deltaY) = ($drawPath[$i + 2] - $drawPath[$i + 0], $drawPath[$i + 3] - $drawPath[$i + 1]);
                 my $edgelen = sqrt($deltaX **2 + $deltaY **2);
+                if ($edgelen < 0.00001) { next; }
                 #move edge toward or away from test point, based on whether it was inside or outside the polygon:
                 ($drawPath[$i + 0], $drawPath[$i + 1]) = ($drawPath[$i + 0] + $inside{$i} * $deltaY / $edgelen, $drawPath[$i + 1] - $inside{$i} * $deltaX / $edgelen);
                 ($drawPath[$i + 2], $drawPath[$i + 3]) = ($drawPath[$i + 2] + $inside{$i} * $deltaY / $edgelen, $drawPath[$i + 3] - $inside{$i} * $deltaX / $edgelen);
@@ -949,19 +956,24 @@ sub outline
                 if (!$deltaX) #special case: current edge is a vertical line
                 {
                     if (!$prevdeltaX) { mywarn("2 adjacent polygon edges are vertical?"); } #shouldn't happen (2 adjacent edges should not be parallel)
-                    $cornerY = $prevdeltaY/$prevdeltaX * ($cornerX - $drawPath[$previ + 0]) + $drawPath[$previ + 1];
+                    else { $cornerY = $prevdeltaY/$prevdeltaX * ($cornerX - $drawPath[$previ + 0]) + $drawPath[$previ + 1]; }
+#                    DebugPrint(sprintf("corner-vert-now = (%5.5f, %5.5f), prev delta (%5.5f, %5.5f)\n", inchesX($cornerX), inchesY($cornerY), inchesX($prevdeltaX), inchesY($prevdeltaY)), 60);
                 }
                 elsif (!$prevdeltaX) #special case: previous edge was a vertical line
                 {
                     $cornerX = $drawPath[$previ + 2];
                     $cornerY = $deltaY/$deltaX * ($cornerX - $drawPath[$i + 0]) + $drawPath[$i + 1];
+#                    DebugPrint(sprintf("corner-vert-prev = (%5.5f, %5.5f), cur delta (%5.5f, %5.5f)\n", inchesX($cornerX), inchesY($cornerY), inchesX($deltaX), inchesY($deltaY)), 60);
                 }
+                elsif (abs($deltaY/$deltaX - $prevdeltaY/$prevdeltaX) < .0001) { mywarn(sprintf("2 adjacent polygon edges are parallel: edge[%d] (%5.5f, %5.5f) - (%5.5f, %5.5f) and edge[%d] (%5.5f, %5.5f) - (%5.5f, %5.5f)", -$i/6, inchesX($drawPath[$i + 0]), inchesY($drawPath[$i + 1]), inchesX($drawPath[$i + 2]), inchesY($drawPath[$i + 3]), -$previ/6, inchesX($drawPath[$previ + 0]), inchesY($drawPath[$previ + 1]), inchesX($drawPath[$previ + 2]), inchesY($drawPath[$previ + 3]))); } #shouldn't happen (2 adjacent edges should not be parallel)
                 else #neither edge is vertical, solve for x then y
                 {
                     if ($deltaY/$deltaX == $prevdeltaY/$prevdeltaX) { mywarn("2 adjacent polygon edges are parallel?"); } #shouldn't happen (2 adjacent edges should not be parallel)
                     $cornerX = $deltaY/$deltaX * $cornerX - $prevdeltaY/$prevdeltaX * $drawPath[$previ + 2] + $drawPath[$previ + 3] - $cornerY;
                     $cornerX /= $deltaY/$deltaX - $prevdeltaY/$prevdeltaX;
                     $cornerY = $deltaY/$deltaX * ($cornerX - $drawPath[$i + 2]) + $drawPath[$i + 3];
+#                    DebugPrint(sprintf("corner-non-vert = (%5.5f, %5.5f), cur delta (%5.5f, %5.5f), prev delta (%5.5f, %5.5f)\n", inchesX($cornerX), inchesY($cornerY), inchesX($deltaX), inchesY($deltaY), inchesX($prevdeltaX), inchesY($prevdeltaY)), 60);
+#                    if (($cornerX > 10000) || ($cornerY > 10000)) { DebugPrint("WHOOPS\n"); }
                 }
                 DebugPrint(sprintf("polygon corner %d: moved from (%5.5f, %5.5f) to (%5.5f, %5.5f)\n", -$i/6, inchesX($drawPath[$i + 0]), inchesY($drawPath[$i + 1]), inchesX($cornerX), inchesY($cornerY)), 5);
                 ($drawPath[$i + 0], $drawPath[$i + 1]) = ($cornerX, $cornerY);
@@ -986,7 +998,7 @@ sub outline
         DebugPrint(sprintf("stroke curve: (%5.5f, %5.5f) thru (%5.5f, %5.5f) and (%5.5f, %5.5f) to (%5.5f, %5.5f), vis-s $visibleFillColor{'s'}, weight $lastStrokeWeight, aper $lastAperture\n", inchesX($drawPath[-10]), inchesY($drawPath[-9]), inchesX($drawPath[-8]), inchesY($drawPath[-7]), inchesX($drawPath[-6]), inchesY($drawPath[-5]), inchesX($drawPath[-4]), inchesY($drawPath[-3])), 8);
         my ($x0, $y0, $x1, $y1, $x2, $y2, $x3, $y3) = ($drawPath[-10], $drawPath[-9], $drawPath[-8], $drawPath[-7], $drawPath[-6], $drawPath[-5], $drawPath[-4], $drawPath[-3]);
         #compute Bezier curve points as before:
-        # R(t) = (1Ðt)^3 * P0 + 3t(1Ðt)^2 * P1 + 3t^2(1Ðt) P2 + t^3 P3  where t -> 0 .. 1.0
+        # R(t) = (1Ãt)^3 * P0 + 3t(1Ãt)^2 * P1 + 3t^2(1Ãt) P2 + t^3 P3  where t -> 0 .. 1.0
         for (my $t = 0; $t <= 1.0; $t += 1/BEZIER_PRECISION)
         {
             # Compute the new X and Y locations
@@ -1188,7 +1200,7 @@ sub fill
         outline(points(FILL_WIDTH)/2);
 
         #determine bounding rect (used as limits for fill):
-        my ($minX, $minY, $maxX, $maxY);
+        my ($minX, $minY, $maxX, $maxY) = (0, 0, 0, 0); #initialize in case polygon is incomplete
         for (my ($i, $first) = (-6 * $drawPath[-2], TRUE); $i < 0; $i += 6, $first = FALSE)
         {
             $minX = min($first? $drawPath[$i + 0]: $minX, $drawPath[$i + 2]);
@@ -1328,15 +1340,17 @@ sub popshape
 {
     our @drawPath; #globals
 
+    my $retval = FALSE;
     for (my ($numsh) = scalar(@_)? @_: (1); $numsh > 0; --$numsh) #consume next shape
     {
-        if (scalar(@drawPath) < 2) { mywarn(sprintf("whoops %d < $numsh", scalar(@drawPath))); return; } #probably a bug
-        if ($drawPath[-1] eq "rect") { splice(@drawPath, -6, 6); } #minX, minY, maxX, maxY, count, type
-        elsif ($drawPath[-1] eq "line") { splice(@drawPath, -6, 6); } #startX, startY, endX, endY, count, type
-        elsif ($drawPath[-1] eq "curve") { splice(@drawPath, -10, 10); } #x0, y0, x1, y1, x2, y2, x3, y3, count, type
-        elsif ($drawPath[-1] eq "circle") { splice(@drawPath, -5, 5); } #centerX, centerY, diameter, count, type
+        if (scalar(@drawPath) < 2) { mywarn(sprintf("whoops %d < $numsh", scalar(@drawPath))); return $retval; } #probably a bug
+        if ($drawPath[-1] eq "rect") { splice(@drawPath, -6, 6); $retval = TRUE; } #minX, minY, maxX, maxY, count, type
+        elsif ($drawPath[-1] eq "line") { splice(@drawPath, -6, 6); $retval = TRUE; } #startX, startY, endX, endY, count, type
+        elsif ($drawPath[-1] eq "curve") { splice(@drawPath, -10, 10); $retval = TRUE; } #x0, y0, x1, y1, x2, y2, x3, y3, count, type
+        elsif ($drawPath[-1] eq "circle") { splice(@drawPath, -5, 5); $retval = TRUE; } #centerX, centerY, diameter, count, type
         else { mywarn("unrecognized shape: $drawPath[-1]"); } #probably a bug
     }
+    return $retval;
 }
 
 #decode PDF1.4 flate encoding:
@@ -1367,9 +1381,9 @@ sub decompress
             open my $outstream, ">$outputDir$filename";
             print $outstream $decompressed;
             close $outstream;
-            DebugPrint("wrote stream#$grab_streams to $filename\n", 5);
+            DebugPrint("wrote stream#$grab_streams len $(decompressed) to $filename\n", 5);
         }
-        DebugPrint("outbuf: old len " . length($buf) . " => $stofs + " . length($decompressed) . " + $enofs\n", 6);
+        DebugPrint(sprintf("outbuf: old len " . length($buf) . " => $stofs header + " . length($compressed) . " -> " . length($decompressed) . " decompressed stream + %d trailer \n", length($buf) - $enofs), 6);
         #substr($buf, $stofs, $enofs) = $decompressed . "\n";
         $buf = substr($buf, 0, $stofs) . "stream\r\n" . $decompressed . "\nendstream\r\n" . substr($buf, $enofs);
     }
