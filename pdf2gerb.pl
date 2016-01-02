@@ -30,6 +30,7 @@
 # 1.6h     4/11/13  DJ   allow \r\n between "<<" and "/FlateDecode"; make \n optional between commands; join commands that are split across lines; added more debug; force input to Unicode
 # 1.6i     7/14/14  DJ   avoid /0 error for nudge line segment or polygon edge, avoid infinite loops for outline/fill unknown shapes, fix handling of 2 adjacent polygon edges parallel (shouldn't happen, though)
 # 1.6j     9/30/15  DJ   fix an additional subscript error; perl short-circuit IF doesn't seem to be working
+# 1.6k     1/2/16  DJ   undo attempt to compensate for Unicode; broke parser logic
 #
 # TODO maybe:
 # -elliptical pads? (draw short line seg using round aperture)
@@ -99,7 +100,7 @@ use Encode; #::Detect::Detector; #for detecting charset encoding
 ##sub min;
 ##sub max;
 
-use constant VERSION => '1.6j';
+use constant VERSION => '1.6k';
 #just a little warning; set realistic expectations:
 printf "Pdf2Gerb.pl %s\nThis is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!\n\n", VERSION;
 
@@ -424,7 +425,7 @@ sub getfiles
         read $pdfFile, my $rawPdfContents, MAX_BYTES;
         close $pdfFile; #close file after reading
 #        $rawPdfContents = decode_utf8($rawPdfContents);
-        $rawPdfContents = Encode::decode('iso-8859-1', $rawPdfContents); #convert to Unicode
+#NO        $rawPdfContents = Encode::decode('iso-8859-1', $rawPdfContents); #convert to Unicode
 #        my $enctype = Encode::Detect::Detector::detect($rawPdfContents);
         DebugPrint(sprintf("got %d chars from input file $pdfFilePath\n", length($rawPdfContents)), 2);
 
