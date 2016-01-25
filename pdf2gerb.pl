@@ -30,7 +30,8 @@
 # 1.6h     4/11/13  DJ   allow \r\n between "<<" and "/FlateDecode"; make \n optional between commands; join commands that are split across lines; added more debug; force input to Unicode
 # 1.6i     7/14/14  DJ   avoid /0 error for nudge line segment or polygon edge, avoid infinite loops for outline/fill unknown shapes, fix handling of 2 adjacent polygon edges parallel (shouldn't happen, though)
 # 1.6j     9/30/15  DJ   fix an additional subscript error; perl short-circuit IF doesn't seem to be working
-# 1.6k     1/2/16  DJ   undo attempt to compensate for Unicode; broke parser logic
+# 1.6k     1/2/16   DJ   undo attempt to compensate for Unicode; broke parser logic
+# 1.6L     1/24/16  DJ   handle "re W" on same line, draw/fill bezier curves on silk screen (fill requires additional module), allow stand-alone line fill, add placeholder for curve offset
 #
 # TODO maybe:
 # -elliptical pads? (draw short line seg using round aperture)
@@ -85,6 +86,7 @@ use File::Spec; #Path::Class; #for folder name manipulation
 use Time::HiRes qw(time); #for elapsed time calculation
 use List::Util qw[min max];
 use Encode; #::Detect::Detector; #for detecting charset encoding
+#use Math::Bezier; #http://search.cpan.org/~abw/Math-Bezier-0.01/Bezier.pm
 
 #are fwd defs needed?
 #sub inches; #ToInches;
@@ -100,7 +102,7 @@ use Encode; #::Detect::Detector; #for detecting charset encoding
 ##sub min;
 ##sub max;
 
-use constant VERSION => '1.6k';
+use constant VERSION => '1.6L';
 #just a little warning; set realistic expectations:
 printf "Pdf2Gerb.pl %s\nThis is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!\n\n", VERSION;
 
@@ -443,7 +445,7 @@ sub getfiles
         #try to fix it here:
         $pdfContents =~ s/(-?\d+\.?\d*)\s*\n\s*(c|-?\d+\.?\d*)\s+/$1 $2 /gs; #join c or other commands that are split across lines
         $pdfContents =~ s/(-?\d+\.?\d*\s+)(c|m)\s+(-?\d+\.?\d*)/$1$2\n$3/gs; #split c and m commands if on same line
-        $pdfContents =~ s/(re|c|m|l)\s+(f|h|S)/$1\n$2/gs; #split re/c/m/l and f/h/S commands if on same line
+        $pdfContents =~ s/(re|c|m|l)\s+(f|h|S|W)/$1\n$2/gs; #split re/c/m/l and f/h/S commands if on same line; also W
 #        open my $outstream, ">$outputDir" . "pdfdebug.txt";
 #        print $outstream $pdfContents;
 #        close $outstream;
@@ -818,7 +820,8 @@ sub drawshapes
         #however, this behavior can be overridden using the SUBST_CIRCLE_CLIPRECT option, as a work-around for CAD software that uses clip rects along with other, unrecognized drawing commands
         if (!SUBST_CIRCLE_CLIPRECT) { return TRUE; }
         reduceRect(); #check if last 3 or 4 line segments in drawing path make a rect
-        if ($drawPath[-1] eq "rect") #intersect clipping rect with drawing path to get new clip rect
+        if (scalar(@drawPath) < 2) { mywarn(sprintf("not a rect: %d", scalar(@drawPath))); }
+        elsif ($drawPath[-1] eq "rect") #intersect clipping rect with drawing path to get new clip rect
         {
             my ($minX, $minY, $maxX, $maxY) = ($drawPath[-6], $drawPath[-5], $drawPath[-4], $drawPath[-3]);
             DebugPrint(sprintf("clip rect: (%5.5f, %5.5f) .. (%5.5f, %5.5f) replaced with circle\n", inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY)), 8);
@@ -995,12 +998,13 @@ sub outline
 
     if ($drawPath[-1] eq "curve") #arc (bezier curve); arc or part of a circle, not a full circle
     {
-        if ($ofs) { mywarn("arc offset not implemented"); } #probably a bug
+        if ($ofs) { mywarn("arc offset $ofs not implemented"); } #probably a bug
         #NOTE: this handles circles on silk scren layer (4 bezier curves are used, one for each quadrant)
         DebugPrint(sprintf("stroke curve: (%5.5f, %5.5f) thru (%5.5f, %5.5f) and (%5.5f, %5.5f) to (%5.5f, %5.5f), vis-s $visibleFillColor{'s'}, weight $lastStrokeWeight, aper $lastAperture\n", inchesX($drawPath[-10]), inchesY($drawPath[-9]), inchesX($drawPath[-8]), inchesY($drawPath[-7]), inchesX($drawPath[-6]), inchesY($drawPath[-5]), inchesX($drawPath[-4]), inchesY($drawPath[-3])), 8);
         my ($x0, $y0, $x1, $y1, $x2, $y2, $x3, $y3) = ($drawPath[-10], $drawPath[-9], $drawPath[-8], $drawPath[-7], $drawPath[-6], $drawPath[-5], $drawPath[-4], $drawPath[-3]);
         #compute Bezier curve points as before:
         # R(t) = (1Ðt)^3 * P0 + 3t(1Ðt)^2 * P1 + 3t^2(1Ðt) P2 + t^3 P3  where t -> 0 .. 1.0
+#TODO: start or end below loop with $ofs; not sure how to decide which case
         for (my $t = 0; $t <= 1.0; $t += 1/BEZIER_PRECISION)
         {
             # Compute the new X and Y locations
@@ -1039,7 +1043,7 @@ sub outline
 #return value: none (uses globals)
 sub fill
 {
-    our (@drawPath, %visibleFillColor, $lastStrokeWeight, $lastAperture, $body, $currentDrillAperture, %masks, %holes, %drillBody); #globals
+    our (@drawPath, %visibleFillColor, $lastStrokeWeight, $lastAperture, $body, $currentDrillAperture, %masks, %holes, %drillBody, $bez_warn); #globals
 
     if ($drawPath[-1] eq "rect") #fill a rect; NOTE: might be square/rect pad or ground plane; can't be a hole (holes are round)
     {
@@ -1201,50 +1205,95 @@ sub fill
         #line width is .01 centered on border, so move it a half-width toward center of circle to preserve overall circle size correctly
         outline(points(FILL_WIDTH)/2);
 
-        #determine bounding rect (used as limits for fill):
-        my ($minX, $minY, $maxX, $maxY) = (0, 0, 0, 0); #initialize in case polygon is incomplete
-        for (my ($i, $first) = (-6 * $drawPath[-2], TRUE); $i < 0; $i += 6, $first = FALSE)
-        {
-            $minX = min($first? $drawPath[$i + 0]: $minX, $drawPath[$i + 2]);
-            $minY = min($first? $drawPath[$i + 1]: $minY, $drawPath[$i + 3]);
-            $maxX = max($first? $drawPath[$i + 0]: $maxX, $drawPath[$i + 2]);
-            $maxY = max($first? $drawPath[$i + 1]: $maxY, $drawPath[$i + 3]);
-        }
-        DebugPrint(sprintf("polygon: bounding rect (%5.5f, %5.5f) .. (%5.5f, %5.5f) \"$minX $minY $maxX $maxY\", $drawPath[-2] line segs\n", inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY)), 5);
-
-        #now fill polygon by drawing parallel lines:
-        #Based on 2007 code from Darel Rex Finley at http://alienryderflex.com/polygon_fill/
-        #NOTE: algorithm doesn't care if polygon corners were clockwise or counterclockwise, so we can ignore PDF even/odd rules.
-        my $inc = points(FILL_WIDTH - .001); #overlap each line by .001 to prevent gaps in filled area due to rounding errors
-        $minY += $inc;
-        for (my $y = $minY; $y < $maxY; $y += $inc)
-        {
-            #build a list of intersection points of current fill line with polygon sides:
-            my @Xcrossing = ();
-            for (my $i = -6 * $drawPath[-2]; $i < 0; $i += 6)
-            {
-                if ((min($drawPath[$i + 1], $drawPath[$i + 3]) >= $y) || (max($drawPath[$i + 1], $drawPath[$i + 3]) < $y)) { next; } #polygon side doesn't cross current fill line
-                my $x = $drawPath[$i] + ($y - $drawPath[$i + 1]) / ($drawPath[$i + 3] - $drawPath[$i + 1]) * ($drawPath[$i + 2] - $drawPath[$i + 0]); #intersection of test line with edge
-                push(@Xcrossing, $x);
-            }
-            if (!scalar(@Xcrossing)) { next; }
-            @Xcrossing = sort @Xcrossing;
-            DebugPrint(sprintf("fill poly: at y %5.5f found %d crossings: %s\n", inchesY($y), scalar(@Xcrossing), join(", ", @Xcrossing)), 8);
-            #fill between each pair of points:
-            for (my $i = 0; $i + 1 < scalar(@Xcrossing); $i += 2)
-            {
-                $body .= sprintf("X%sY%sD02*\n", inchesX($Xcrossing[$i], FALSE), inchesY($y, FALSE)); #move
-                $body .= sprintf("X%sD01*\n", inchesX($Xcrossing[$i + 1], FALSE)); #draw; Y didn't change, don't need to send it again
-                DebugPrint(sprintf("polyhfill: from (%5.5f, %5.5f) to (%5.5f, \"), inc %5.5f \"$inc\", next %5.5f \"%d\", limit %5.5f \"$maxY\"\n", inchesX($Xcrossing[$i]), inchesY($y), inchesX($Xcrossing[$i + 1]), inches($inc), inchesY($y + $inc), $y + $inc, inchesY($maxY)), 15);
-            }
-        }
+        polyfill(@drawPath, -2, 6);
         popshape($drawPath[-2] - 1); #kludge: caller will pop last line segment
+        return TRUE;
+    }
+
+    if ($drawPath[-1] eq "line") #fill a single line; what does this mean?  must be some graphics
+    {
+        SetPolarity('f');
+        SetAperture('f', points(FILL_WIDTH), points(FILL_WIDTH)); #draw outline to preserve overall shape + size; use square aperture
+#        #line width is .01 centered on border, so move it a half-width toward center of circle to preserve overall circle size correctly
+#        outline(points(FILL_WIDTH)/2);
+        outline(0); #no need to adjust center of a stand-alone line seg?
+#NOTE: caller will pop shape since it is only 1 line segment
+        return TRUE;
+    }
+
+    if ($drawPath[-1] eq "curve") #used for silk screen graphics, not traces or holes
+    {
+#first draw border so it's smooth(er):
+        SetPolarity('f');
+        SetAperture('f', points(FILL_WIDTH)); #outline to preserve overall shape + size
+#line width is .01 centered on border, so move it a half-width toward center of circle to preserve overall circle size correctly
+        outline(points(FILL_WIDTH)/2);
+#then fill bezier curve using a polygon:
+        if (TRUE) { return TRUE; }
+        if (!$bez_warn) { DebugPrint("install Math::Bezier from cpan and uncomment \"use\" near start\n", 1); $bez_warn = 1; }
+# x3[-10] y5[-9] x2[-8] y5[-7] x1[-6] y4[-5] x1[-4] y3[-3] c
+        my $bez = Math::Bezier->new($drawPath[-10], $drawPath[-9], $drawPath[-8], $drawPath[-7], $drawPath[-6], $drawPath[-5], $drawPath[-4], $drawPath[-3]); #4 (x, y) points
+#        my ($x, $y) = $bezier->point(0.5); #(x,y) points along curve, range 0..1
+        my @curve = $bez->curve(BEZIER_PRECISION); #list of (x,y) points along curve
+#        $diameter += RNDPAD_ADJUST; #compensate for rendering arithmetic errors
+#        DebugPrint(sprintf("fill circle: center (%4.4f, %4.4f) \"$drawPath[-5] $drawPath[-4]\", diameter %5.5f (adjusted to %5.5f), weight $lastStrokeWeight, vis-f $visibleFillColor{'f'}, use aperture? %d, to drill? %d, prev drill? %d\n", inchesX($centerX), inchesY($centerY), inches($drawPath[-3]), inches($diameter), inches($diameter) <= MAX_APERTURE, $ishole, exists($holes{$drillxy})), 5);
+        polyfill(@curve, 0, 2);
         return TRUE;
     }
 
     mywarn("fill shape '$drawPath[-1]' $drawPath[-2] not implemented");
     return FALSE;
 }
+
+
+#fill a polygon using parallel lines
+sub polyfill
+{
+    our $body; #globals
+    my @drawPath = shift();
+    my $stofs = shift(); #-2
+    my $stride = shift(); #6
+
+    if (scalar(@drawPath) < 2) { return FALSE; } #avoid subscript error (short-circuit IF polyfill
+    #determine bounding rect (used as limits for fill):
+    my ($minX, $minY, $maxX, $maxY) = (0, 0, 0, 0); #initialize in case polygon is incomplete
+    for (my ($i, $first) = (-$stride * $drawPath[$stofs], TRUE); $i < 0; $i += $stride, $first = FALSE)
+    {
+        $minX = min($first? $drawPath[$i + 0]: $minX, $drawPath[$i + 2]);
+        $minY = min($first? $drawPath[$i + 1]: $minY, $drawPath[$i + 3]);
+        $maxX = max($first? $drawPath[$i + 0]: $maxX, $drawPath[$i + 2]);
+        $maxY = max($first? $drawPath[$i + 1]: $maxY, $drawPath[$i + 3]);
+    }
+    DebugPrint(sprintf("polygon: bounding rect (%5.5f, %5.5f) .. (%5.5f, %5.5f) \"$minX $minY $maxX $maxY\", $drawPath[-2] line segs\n", inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY)), 5);
+
+    #now fill polygon by drawing parallel lines:
+    #Based on 2007 code from Darel Rex Finley at http://alienryderflex.com/polygon_fill/
+    #NOTE: algorithm doesn't care if polygon corners were clockwise or counterclockwise, so we can ignore PDF even/odd rules.
+    my $inc = points(FILL_WIDTH - .001); #overlap each line by .001 to prevent gaps in filled area due to rounding errors
+    $minY += $inc;
+    for (my $y = $minY; $y < $maxY; $y += $inc)
+    {
+        #build a list of intersection points of current fill line with polygon sides:
+        my @Xcrossing = ();
+        for (my $i = -$stride * $drawPath[$stofs]; $i < 0; $i += $stride)
+        {
+            if ((min($drawPath[$i + 1], $drawPath[$i + 3]) >= $y) || (max($drawPath[$i + 1], $drawPath[$i + 3]) < $y)) { next; } #polygon side doesn't cross current fill line
+            my $x = $drawPath[$i] + ($y - $drawPath[$i + 1]) / ($drawPath[$i + 3] - $drawPath[$i + 1]) * ($drawPath[$i + 2] - $drawPath[$i + 0]); #intersection of test line with edge
+            push(@Xcrossing, $x);
+        }
+        if (!scalar(@Xcrossing)) { next; }
+        @Xcrossing = sort @Xcrossing;
+        DebugPrint(sprintf("fill poly: at y %5.5f found %d crossings: %s\n", inchesY($y), scalar(@Xcrossing), join(", ", @Xcrossing)), 8);
+        #fill between each pair of points:
+        for (my $i = 0; $i + 1 < scalar(@Xcrossing); $i += 2)
+        {
+            $body .= sprintf("X%sY%sD02*\n", inchesX($Xcrossing[$i], FALSE), inchesY($y, FALSE)); #move
+            $body .= sprintf("X%sD01*\n", inchesX($Xcrossing[$i + 1], FALSE)); #draw; Y didn't change, don't need to send it again
+            DebugPrint(sprintf("polyhfill: from (%5.5f, %5.5f) to (%5.5f, \"), inc %5.5f \"$inc\", next %5.5f \"%d\", limit %5.5f \"$maxY\"\n", inchesX($Xcrossing[$i]), inchesY($y), inchesX($Xcrossing[$i + 1]), inches($inc), inchesY($y + $inc), $y + $inc, inchesY($maxY)), 15);
+        }
+    }
+}
+
 
 #reduce last 3 or 4 line segments in drawing path to make a rect:
 #This only seems to be used for overall PCB outline.
