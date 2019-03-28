@@ -22,10 +22,10 @@ use constant METRIC => FALSE; #set to TRUE for metric units (only affect final n
 use constant APERTURE_LIMIT => 0; #34; #max #apertures to use; generate warnings if too many apertures are used (0 to not check)
 use constant DRILL_FMT => '2.4'; #'2.3'; #'2.4' is the default for PCB fab; change to '2.3' for CNC
 
-use constant WANT_DEBUG => 990; #10; #level of debug wanted; higher == more, lower == less, 0 == none
+use constant WANT_DEBUG => 0; #10; #level of debug wanted; higher == more, lower == less, 0 == none
 use constant GERBER_DEBUG => 0; #level of debug to include in Gerber file; DON'T USE FOR FABRICATION
 use constant WANT_STREAMS => FALSE; #TRUE; #save decompressed streams to files (for debug)
-use constant WANT_ALLINPUT => TRUE; #FALSE; #TRUE; #save entire input stream (for debug ONLY)
+use constant WANT_ALLINPUT => FALSE; #TRUE; #save entire input stream (for debug ONLY)
 
 #DebugPrint(sprintf("${\(CYAN)}DEBUG: stdout %d, gerber %d, want streams? %d, all input? %d, O/S: $^O, Perl: $]${\(RESET)}\n", WANT_DEBUG, GERBER_DEBUG, WANT_STREAMS, WANT_ALLINPUT), 1);
 #DebugPrint(sprintf("max int = %d, min int = %d\n", MAXINT, MININT), 1); 
