@@ -1,7 +1,8 @@
 #Pdf2Gerb config settings:
-#put this file in same folder/directory as pdf2gerb.pl itself
-#there is only one user of this file, so we don't need a custom package or namespace
-#all constants defined in here will be added to main namespace
+#Put this file in same folder/directory as pdf2gerb.pl itself (global settings),
+#or copy to another folder/directory with PDFs if you want PCB-specific settings.
+#There is only one user of this file, so we don't need a custom package or namespace.
+#NOTE: all constants defined in here will be added to main namespace.
 #package pdf2gerb_cfg;
 
 use strict; #trap undef vars (easier debug)
