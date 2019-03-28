@@ -59,6 +59,7 @@
 #              -> these 3 lines do not have any effect on a Gerber... (but produces odd pad sizes/shapes with FlatCAM)
 # 1.6o     2/24/19  CYO/DJ  (merged) fix round pad mask, fix FlatCAM incompatibility, put at least 2 apertures in DRD file (ViewPlot doesn't load DRD file with only 1 drill); fix spurious trace in open polygon (add RECT_COMPLETION option)
 # 1.6p     3/4-12/19  CYO/DJ  fix reduceRect *again* (generated spurious trace), use first layer title for output filenames, fix up output file names *again*, don't ignore embedded streams if no title found, fix stripNoise
+# 1.6q     3/16-25/19  CYO/DJ  fix trace size on non-converted pads, fix missing pads (only affected display in FlatCAM and ViewPlot, GerbView was only), fix stream processing with only 1 layer, fix missing shapes (older regression), do the stroke part of stroke-and-fill (ignore fill), add CAP_OVERRIDE option so older test files will still work, fix groundplanes (polyfill regression), first try at moving config consts to separate file, fix layer desc chooser again (SMD copper layers don't have holes), added tiny tool size for SMD example file
 #
 #
 # Notes/Current limitations:
@@ -82,9 +83,6 @@
 # -add command-line parameters or config file instead of editing config constants?
 # -use line cap + join styles for all lines? (butt/round/square)
 # -exclude selected layers?
-# -allow input files in any order (almost working, need to write silk layer last)
-# -fix broken curves in silk layer (still readable)
-# -find out why some pads don't show up in ViewPlot?
 #
 #
 # Helpful background links:
@@ -96,7 +94,7 @@
 # Excellon (drill file):  http://www.excellon.com/manuals/program.htm
 # Creating Gerbers:  http://www.sparkfun.com/tutorials/109
 # Gerbv (viewer):  http://gerbv.gpleda.org/index.html
-# Viewplot (viewer):  http://www.viewplot.com  (seems to work best with files in this order: drill, mask, copper, outline)
+# Viewplot (viewer):  http://www.viewplot.com  (seems to work best with files in this order: drill gray, bottom mask, bottom copper red, top mask, top copper green, silk blue, outline)
 # Pdf2Gerb:  http://swannman.github.com/pdf2gerb/
 # (Other)
 # Cubic Bezier curves for circles:  http://www.tinaja.com/glib/ellipse4.pdf
@@ -107,6 +105,7 @@
 # PDFCreator 1.3.2 (CAREFUL: TURN OFF SPYWARE DURING INSTALL):  http://sourceforge.net/projects/pdfcreator/
 # Strawberry Perl (for Windows):  http://www.strawberryperl.com
 # Perl debugging: https://perldoc.perl.org/perldebtut.html
+#  list installed Perl modules: cpan -a
 #
 # More information about this work can be found at the following URL:
 # http://swannman.github.com/pdf2gerb/
@@ -121,7 +120,7 @@ use warnings; #other useful info (easier debug)
 
 use Cwd; #gets current directory
 use Compress::Zlib; #needed for PDF1.4 decompression
-use File::Spec; #Path::Class; #for folder name manipulation
+use File::Spec; #Path::Class; #for folder/directory name manipulation
 use Time::HiRes qw(time); #for elapsed time calculation
 use List::Util qw(min max); #[min max];
 use Encode; #::Detect::Detector; #for detecting charset encoding
@@ -131,6 +130,7 @@ use Term::ANSIColor qw(:constants); #console color codes
 use Term::ANSIColor 2.01 qw(colorstrip); #remove colors; https://perldoc.perl.org/Term/ANSIColor.html
 #not found :( use Const::Fast; #https://stackoverflow.com/questions/4370058/hash-constants-in-perl
 #use Readonly;
+use File::Basename; #https://perldoc.perl.org/File/Basename.html
 
 #are fwd defs needed?
 #sub inches; #ToInches;
@@ -146,31 +146,42 @@ use Term::ANSIColor 2.01 qw(colorstrip); #remove colors; https://perldoc.perl.or
 ##sub min;
 ##sub max;
 
-use constant VERSION => '1.6p';
+#printf STDERR "me at " . __FILE__ . "\n";
+#print STDERR "my dir " . dirname(__FILE__) . "\n";
+#package pdf2gerb; #CAUTION: renames other subs found in this file
+#print STDERR "i am at " . $INC{$_} . "\n";
+use constant VERSION => '1.6q';
 
-#Perl constants can supposedly be optimized at compile time, so here are some:
+#Perl constants can be optimized at compile time (as inlined functions), so here are some:
 #DON'T CHANGE THESE
 use constant { TRUE => 1, FALSE => 0, MAYBE => 2 }; #tri-state values
 use constant { MININT => - 2 ** 31 - 1, MAXINT => 2 ** 31 - 1}; #big enough for simple arithmetic purposes
 use constant { K => 1024, M => 1024 * 1024 }; #used for more concise display of numbers
 use constant PI => 4 * atan2(1, 1); #used for circumference calculations
+if (!TRUE || FALSE) { die("bool consts broken"); }
 
 ##############################################################################################
-#Okay to modify any constants below
-#TODO: put these in a config file
-use constant WANT_COLORS => ($^O !~ m/Win/); #ANSI colors no worky on Windows? this must be set < first DebugPrint() call
+#configurable settings:
+#to change any constants below, edit the default pdf2gerb_cfg.pm file or make a copy in a subfolder/directory first
+use lib dirname(__FILE__); #find packages in Pdf2Gerb folder/directory; https://stackoverflow.com/questions/728597/how-can-my-perl-script-find-its-module-in-the-same-directory
+use lib "."; #allow local settings to override global settings; https://www.perlmonks.org/bare/?node_id=375341
+use pdf2gerb_cfg; #read settings from separate file; check CWD first, then Pdf2Gerb folder/directory
+
+#constants below were moved to pdf2gerb_cfg.pm:
+#use constant WANT_COLORS => ($^O !~ m/Win/); #ANSI colors no worky on Windows? this must be set < first DebugPrint() call
 
 #just a little warning; set realistic expectations:
-DebugPrint("${\(CYAN)}Pdf2Gerb.pl ${\(VERSION)}, $^O O/S\n${\(YELLOW)}${\(BOLD)}${\(ITALIC)}This is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!${\(RESET)}", 0);
+DebugPrint("${\(CYAN)}Pdf2Gerb.pl ${\(VERSION)}, $^O O/S\n${\(YELLOW)}${\(BOLD)}${\(ITALIC)}This is EXPERIMENTAL software.  \nGerber files MAY CONTAIN ERRORS.  Please CHECK them before fabrication!${\(RESET)}", 0); #if WANT_DEBUG
 
-use constant METRIC => FALSE; #set to TRUE for metric units (only affect final numbers in output files, not internal arithmetic)
-use constant APERTURE_LIMIT => 0; #34; #generate warnings if too many apertures are used (0 to not check)
-use constant DRILL_FMT => '2.4'; #'2.3'; #'2.4' is the default for PCB fab; change to '2.3' for CNC
+#use constant METRIC => FALSE; #set to TRUE for metric units (only affect final numbers in output files, not internal arithmetic)
+#use constant APERTURE_LIMIT => 0; #34; #max #apertures to use; generate warnings if too many apertures are used (0 to not check)
+#use constant DRILL_FMT => '2.4'; #'2.3'; #'2.4' is the default for PCB fab; change to '2.3' for CNC
 
-use constant WANT_DEBUG => 0; #10; #level of debug wanted; higher == more, lower == less, 0 == none
-use constant GERBER_DEBUG => 0; #level of debug to include in Gerber file; DON'T USE FOR FABRICATION
-use constant WANT_STREAMS => FALSE; #TRUE; #save decompressed streams to files (for debug)
-use constant WANT_ALLINPUT => FALSE; #TRUE; #save entire input stream (for debug ONLY)
+#use constant WANT_DEBUG => 990; #10; #level of debug wanted; higher == more, lower == less, 0 == none
+#print STDERR "WANT_DEBUG = ${\(WANT_DEBUG)}\n"; exit();
+#use constant GERBER_DEBUG => 0; #level of debug to include in Gerber file; DON'T USE FOR FABRICATION
+#use constant WANT_STREAMS => FALSE; #TRUE; #save decompressed streams to files (for debug)
+#use constant WANT_ALLINPUT => TRUE; #FALSE; #TRUE; #save entire input stream (for debug ONLY)
 
 DebugPrint(sprintf("${\(CYAN)}DEBUG: stdout %d, gerber %d, want streams? %d, all input? %d, O/S: $^O, Perl: $]${\(RESET)}\n", WANT_DEBUG, GERBER_DEBUG, WANT_STREAMS, WANT_ALLINPUT), 1);
 #DebugPrint(sprintf("max int = %d, min int = %d\n", MAXINT, MININT), 1); 
@@ -180,51 +191,52 @@ DebugPrint(sprintf("${\(CYAN)}DEBUG: stdout %d, gerber %d, want streams? %d, all
 #(I'm not sure how photoplotters handle strange sizes).
 #Fewer choices here gives more accurate mapping in the final Gerber files.
 #units are in inches
-use constant TOOL_SIZES => #add more as desired
-(
+#use constant TOOL_SIZES => #add more as desired
+#(
 #round or square pads (> 0) and drills (< 0):
-    .031, -.014,  #used for vias
-    .041, -.020,  #smallest non-filled plated hole
-    .051, -.025,
-    .056, -.029,  #useful for IC pins
-    .070, -.033,
-    .075, -.040,  #heavier leads
+#    .010, -.001,  #tiny pads for SMD; dummy drill size (too small for practical use, but needed so StandardTool will use this entry)
+#    .031, -.014,  #used for vias
+#    .041, -.020,  #smallest non-filled plated hole
+#    .051, -.025,
+#    .056, -.029,  #useful for IC pins
+#    .070, -.033,
+#    .075, -.040,  #heavier leads
 #    .090, -.043,  #NOTE: 600 dpi is not high enough resolution to reliably distinguish between .043" and .046", so choose 1 of the 2 here
-    .100, -.046,
-    .115, -.052,
-    .130, -.061,
-    .140, -.067,
-    .150, -.079,
-    .175, -.088,
-    .190, -.093,
-    .200, -.100,
-    .220, -.110,
-    .160, -.125,  #useful for mounting holes
+#    .100, -.046,
+#    .115, -.052,
+#    .130, -.061,
+#    .140, -.067,
+#    .150, -.079,
+#    .175, -.088,
+#    .190, -.093,
+#    .200, -.100,
+#    .220, -.110,
+#    .160, -.125,  #useful for mounting holes
 #some additional pad sizes without holes (repeat a previous hole size if you just want the pad size):
-    .090, -.040,  #want a .090 pad option, but use dummy hole size
-    .065, -.040, #.035 x .065 rect pad
-    .035, -.040, #.035 x .065 rect pad
+#    .090, -.040,  #want a .090 pad option, but use dummy hole size
+#    .065, -.040, #.065 x .065 rect pad
+#    .035, -.040, #.035 x .065 rect pad
 #traces:
-    .001,  #too thin for real traces; use only for board outlines
-    .006,  #minimum real trace width; mainly used for text
-    .008,  #mainly used for mid-sized text, not traces
-    .010,  #minimum recommended trace width for low-current signals
-    .012,
-    .015,  #moderate low-voltage current
-    .020,  #heavier trace for power, ground (even if a lighter one is adequate)
-    .025,
-    .030,  #heavy-current traces; be careful with these ones!
-    .040,
-    .050,
-    .060,
-    .080,
-    .100,
-    .120,
-);
+#    .001,  #too thin for real traces; use only for board outlines
+#    .006,  #minimum real trace width; mainly used for text
+#    .008,  #mainly used for mid-sized text, not traces
+#    .010,  #minimum recommended trace width for low-current signals
+#    .012,
+#    .015,  #moderate low-voltage current
+#    .020,  #heavier trace for power, ground (even if a lighter one is adequate)
+#    .025,
+#    .030,  #heavy-current traces; be careful with these ones!
+#    .040,
+#    .050,
+#    .060,
+#    .080,
+#    .100,
+#    .120,
+#);
 #Areas larger than the values below will be filled with parallel lines:
 #This cuts down on the number of aperture sizes used.
 #Set to 0 to always use an aperture or drill, regardless of size.
-use constant { MAX_APERTURE => max((TOOL_SIZES)) + .004, MAX_DRILL => -min((TOOL_SIZES)) + .004 }; #max aperture and drill sizes (plus a little tolerance)
+#use constant { MAX_APERTURE => max((TOOL_SIZES)) + .004, MAX_DRILL => -min((TOOL_SIZES)) + .004 }; #max aperture and drill sizes (plus a little tolerance)
 DebugPrint(sprintf("using %d standard tool sizes: %s, max aper %.3f, max drill %.3f\n", scalar((TOOL_SIZES)), join(", ", (TOOL_SIZES)), MAX_APERTURE, MAX_DRILL), 1);
 
 #NOTE: Compare the PDF to the original CAD file to check the accuracy of the PDF rendering and parsing!
@@ -238,91 +250,93 @@ DebugPrint(sprintf("using %d standard tool sizes: %s, max aper %.3f, max drill %
 #  .040                .04267              +.00267
 #This was usually ~ .002" - .003" too big compared to the hole as displayed in the CAD software.
 #To compensate for PDF rendering errors (either during CAD Print function or PDF parsing logic), adjust the values below as needed.
-#units are pixels; for example, a value of 2.4 at 600 dpi = .004 inch, 2 at 600 dpi = .0033"
-use constant
-{
-    HOLE_ADJUST => -2.6, #holes seemed to be slightly oversized (by .002" - .004"), so shrink them a little
-    RNDPAD_ADJUST => -2, #-2.4, #round pads seemed to be slightly oversized, so shrink them a little
-    SQRPAD_ADJUST => +.5, #square pads are sometimes too small by .00067, so bump them up a little
-    RECTPAD_ADJUST => 0, #rectangular pads seem to be okay; actually, i didn't test them much :(
-    TRACE_ADJUST => 0, #traces seemed to be okay
-    REDUCE_TOLERANCE => .001, #allow this much variation when reducing circles and rects (inches)
-};
+#units are pixels; for example, a value of 2.4 at 600 dpi = .0004 inch, 2 at 600 dpi = .0033"
+#use constant
+#{
+#    HOLE_ADJUST => -0.004 * 600, #-2.6, #holes seemed to be slightly oversized (by .002" - .004"), so shrink them a little
+#    RNDPAD_ADJUST => -0.003 * 600, #-2, #-2.4, #round pads seemed to be slightly oversized, so shrink them a little
+#    SQRPAD_ADJUST => +0.001 * 600, #+.5, #square pads are sometimes too small by .00067, so bump them up a little
+#    RECTPAD_ADJUST => 0, #(pixels) rectangular pads seem to be okay? (not tested much)
+#    TRACE_ADJUST => 0, #(pixels) traces seemed to be okay?
+#    REDUCE_TOLERANCE => .001, #(inches) allow this much variation when reducing circles and rects
+#};
 
 #Also, my CAD's Print function or the PDF print driver I used was a little off for circles, so define some additional adjustment values here:
 #Values are added to X/Y coordinates; units are pixels; for example, a value of 1 at 600 dpi would be ~= .002 inch
-use constant
-{
-    CIRCLE_ADJUST_MINX => 0,
-    CIRCLE_ADJUST_MINY => -1, #circles were a little too high, so nudge them a little lower
-    CIRCLE_ADJUST_MAXX => +1, #circles were a little too far to the left, so nudge them a little to the right
-    CIRCLE_ADJUST_MAXY => 0,
-    SUBST_CIRCLE_CLIPRECT => FALSE, #generate circle and substitute for clip rects (to compensate for the way some CAD software draws circles)
-    WANT_CLIPRECT => TRUE, #FALSE, #AI doesn't need clip rect at all? should be on normally?
-    RECT_COMPLETION => FALSE, #TRUE, #fill in 4th side of rect when 3 sides found
-};
+#use constant
+#{
+#    CIRCLE_ADJUST_MINX => 0,
+#    CIRCLE_ADJUST_MINY => -0.001 * 600, #-1, #circles were a little too high, so nudge them a little lower
+#    CIRCLE_ADJUST_MAXX => +0.001 * 600, #+1, #circles were a little too far to the left, so nudge them a little to the right
+#    CIRCLE_ADJUST_MAXY => 0,
+#    SUBST_CIRCLE_CLIPRECT => FALSE, #generate circle and substitute for clip rects (to compensate for the way some CAD software draws circles)
+#    WANT_CLIPRECT => TRUE, #FALSE, #AI doesn't need clip rect at all? should be on normally?
+#    RECT_COMPLETION => FALSE, #TRUE, #fill in 4th side of rect when 3 sides found
+#};
 
 #allow .012 clearance around pads for solder mask:
 #This value effectively adjusts pad sizes in the TOOL_SIZES list above (only for solder mask layers).
-use constant SOLDER_MARGIN => +.012; #units are inches
+#use constant SOLDER_MARGIN => +.012; #units are inches
 
 #line join/cap styles:
-use constant
-{
-    CAP_NONE => 0, #butt (none); line is exact length
-    CAP_ROUND => 1, #round cap/join; line overhangs by a semi-circle at either end
-    CAP_SQUARE => 2, #square cap/join; line overhangs by a half square on either end
-};
+#use constant
+#{
+#    CAP_NONE => 0, #butt (none); line is exact length
+#    CAP_ROUND => 1, #round cap/join; line overhangs by a semi-circle at either end
+#    CAP_SQUARE => 2, #square cap/join; line overhangs by a half square on either end
+#    CAP_OVERRIDE => FALSE, #cap style overrides drawing logic
+#};
 
 #number of elements in each shape type:
-use constant
-{
-    RECT_SHAPELEN => 6, #x0, y0, x1, y1, count, "rect" (start, end corners)
-    LINE_SHAPELEN => 6, #x0, y0, x1, y1, count, "line" (line seg)
-    CURVE_SHAPELEN => 10, #xstart, ystart, x0, y0, x1, y1, xend, yend, count, "curve" (bezier 2 points)
-    CIRCLE_SHAPELEN => 5, #x, y, 5, count, "circle" (center + radius)
-};
+#use constant
+#{
+#    RECT_SHAPELEN => 6, #x0, y0, x1, y1, count, "rect" (start, end corners)
+#    LINE_SHAPELEN => 6, #x0, y0, x1, y1, count, "line" (line seg)
+#    CURVE_SHAPELEN => 10, #xstart, ystart, x0, y0, x1, y1, xend, yend, count, "curve" (bezier 2 points)
+#    CIRCLE_SHAPELEN => 5, #x, y, 5, count, "circle" (center + radius)
+#};
 #const my %SHAPELEN =
 #Readonly my %SHAPELEN =>
-our %SHAPELEN =
-(
-    rect => RECT_SHAPELEN,
-    line => LINE_SHAPELEN,
-    curve => CURVE_SHAPELEN,
-    circle => CIRCLE_SHAPELEN,
-);
+#our %SHAPELEN =
+#(
+#    rect => RECT_SHAPELEN,
+#    line => LINE_SHAPELEN,
+#    curve => CURVE_SHAPELEN,
+#    circle => CIRCLE_SHAPELEN,
+#);
 
 #panelization:
 #This will repeat the entire body the number of times indicated along the X or Y axes (files grow accordingly).
 #Display elements that overhang PCB boundary can be squashed or left as-is (typically text or other silk screen markings).
 #Set "overhangs" TRUE to allow overhangs, FALSE to truncate them.
 #xpad and ypad allow margins to be added around outer edge of panelized PCB.
-use constant PANELIZE => {'x' => 1, 'y' => 1, 'xpad' => 0, 'ypad' => 0, 'overhangs' => TRUE}; #number of times to repeat in X and Y directions
+#use constant PANELIZE => {'x' => 1, 'y' => 1, 'xpad' => 0, 'ypad' => 0, 'overhangs' => TRUE}; #number of times to repeat in X and Y directions
 
 # Set this to 1 if you need TurboCAD support.
 #$turboCAD = FALSE; #is this still needed as an option?
 
 #CIRCAD pad generation uses an appropriate aperture, then moves it (stroke) "a little" - we use this to find pads and distinguish them from PCB holes. 
-use constant PAD_STROKE => 0.3;
+#use constant PAD_STROKE => 0.3; #0.0005 * 600; #units are pixels
 #convert very short traces to pads or holes:
-use constant TRACE_MINLEN => .001; #units are inches
-use constant REMOVE_POLARITY => FALSE; #TRUE; #set to remove subtractive (negative) polarity; NOTE: must be FALSE for ground planes
+#use constant TRACE_MINLEN => .001; #units are inches
+#use constant ALWAYS_XY => TRUE; #FALSE; #force XY even if X or Y doesn't change; NOTE: needs to be TRUE for all pads to show in FlatCAM and ViewPlot
+#use constant REMOVE_POLARITY => FALSE; #TRUE; #set to remove subtractive (negative) polarity; NOTE: must be FALSE for ground planes
 
 #PDF uses "points", each point = 1/72 inch
 #combined with a PDF scale factor of .12, this gives 600 dpi resolution (1/72 * .12 = 600 dpi)
-use constant INCHES_PER_POINT => 1/72; #0.0138888889; #multiply point-size by this to get inches
+#use constant INCHES_PER_POINT => 1/72; #0.0138888889; #multiply point-size by this to get inches
 
 # The precision used when computing a bezier curve. Higher numbers are more precise but slower (and generate larger files).
 #$bezierPrecision = 100;
-use constant BEZIER_PRECISION => 36; #100; #use const; reduced for faster rendering (mainly used for silk screen and thermal pads)
+#use constant BEZIER_PRECISION => 36; #100; #use const; reduced for faster rendering (mainly used for silk screen and thermal pads)
 
 # Ground planes and silk screen or larger copper rectangles or circles are filled line-by-line using this resolution.
-use constant FILL_WIDTH => .01; #fill at most 0.01 inch at a time
+#use constant FILL_WIDTH => .01; #fill at most 0.01 inch at a time
 
 # The max number of characters to read into memory
-use constant MAX_BYTES => 10 * M; #bumped up to 10 MB, use const
+#use constant MAX_BYTES => 10 * M; #bumped up to 10 MB, use const
 
-use constant DUP_DRILL1 => TRUE; #FALSE; #kludge: ViewPlot doesn't load drill files that are too small so duplicate first tool
+#use constant DUP_DRILL1 => TRUE; #FALSE; #kludge: ViewPlot doesn't load drill files that are too small so duplicate first tool
 
 my $runtime = time(); #Time::HiRes::gettimeofday(); #measure my execution time
 
@@ -331,7 +345,6 @@ my $runtime = time(); #Time::HiRes::gettimeofday(); #measure my execution time
 #Start of main logic:
 ###########################################################################
 
-
 #use constant INFILES => ("top copper", "bottom copper", "silk");
 if ((scalar(@ARGV) < 1) || (scalar(@ARGV) > 3)) #allow up to 3 pdfs to define multiple layers in separate files
 {
@@ -339,7 +352,7 @@ if ((scalar(@ARGV) < 1) || (scalar(@ARGV) > 3)) #allow up to 3 pdfs to define mu
     if ($os =~ m/Win/) { $prefix = "perl"; } #bash-ify may not work on Windows (ie, without CygWin)
     DebugPrint("${\(RED)}Usage: $prefix pdf2gerb.pl <top-copper.pdf> [<bottom-copper.pdf>] [<top-silk.pdf>]${\(RESET)}", 0);
     if ($prefix ne "") { DebugPrint("${\(YELLOW)}On Windows, you may need to put \"perl\" at the start.${\(RESET)}", 0); }
-    DebugPrint("${\(YELLOW)}Output files will be placed in the current working folder.${\(RESET)}", 0);
+    DebugPrint("${\(YELLOW)}Output files will be placed in the current working folder/directory.${\(RESET)}", 0);
     DebugPrint(sprintf("${\(RED)} %d args found (1 - 3 expected):${\(RESET)}", scalar(@ARGV)), 0);
     foreach(@ARGV) { DebugPrint("${\(CYAN)}$_${\(RESET)}", 0); }
     exit;
@@ -349,6 +362,7 @@ if ((scalar(@ARGV) < 1) || (scalar(@ARGV) > 3)) #allow up to 3 pdfs to define mu
 # first layer name will be used for output file names
 our @layerTitles = ();
 our %seenTypes = (); #"type" (purpose) of each layer: top/bottom and silk/copper; determined by file name and/or command line order
+our $found_silk = FALSE;
 
 #moved up here so it's only done once:
 # Which layer we're on
@@ -384,11 +398,15 @@ if (WANT_ALLINPUT) #save entire input stream (for debug ONLY)
 our $is_AI = ($pdfContents =~ m/Adobe Illustrator/gs)? TRUE: FALSE;
 DebugPrint("is AI? $is_AI\n", 1);
 our $rot = 0; #initialize in case not found below
+#move up here to avoid warnings with AI:
+our ($offsetX, $offsetY) = (0, 0);
+our $scaleFactor = INCHES_PER_POINT; #0.0138888889; #use const
 
 #pre-scan all layers to determine PCB size and origin (outline might not be on the first layer)
 if (scalar(@layerTitles) > 1)
 {
     our @lines = ();
+    pos($pdfContents) = 0; # Reset the match position to the beginning
     while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     {
         my @morelines = split /\n/, $1;
@@ -396,13 +414,11 @@ if (scalar(@layerTitles) > 1)
         push(@lines, @morelines);
     }
     boundingRect(); #get pcb size and origin
-
-    # Reset the match position to the beginning
-    pos($pdfContents) = 0; #is this still needed?
 }
 
 # Break the file(s) into layers (BDC...EMC)
 #my ($seen_copper, $seen_silk) = (FALSE, FALSE);
+pos($pdfContents) = 0; #reset regex search position
 while ($pdfContents =~ m/BDC(.*?)EMC/gs)
 {
     # Break the layer into separate lines
@@ -421,8 +437,8 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     our %drillApertures = (); #changed to hash
 
     # Multiply value in points by this to get value in inches
-    our $scaleFactor = INCHES_PER_POINT; #0.0138888889; #use const
-    our ($offsetX, $offsetY) = (0, 0); #note: default PDF coordinate space has origin at lower left
+    $scaleFactor = INCHES_PER_POINT; #0.0138888889; #use const
+    ($offsetX, $offsetY) = (0, 0); #note: default PDF coordinate space has origin at lower left
 
     our $lastAperture = "";
     our $currentDrillAperture = "";
@@ -449,7 +465,7 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     {
         ++$currentLine; #not too useful since it's relative to embedded PDF stream, but track it anyway for debug
         if ($line =~ m/^\s*$/) { next; } #skip empty lines (silently)
-        DebugPrint("linein# $currentLine: \"$line\"" . (ignore()? " IGNORED": "") . "\n", 19);
+        DebugPrint("linein# $currentLine: \"$line\"" . (ignore()? " IGNORED ${\(ignore())}": "") . "\n", 19);
 
         #process various types of PDF commands:
         if (ignore()) { next; }
@@ -481,7 +497,7 @@ while ($pdfContents =~ m/BDC(.*?)EMC/gs)
     if ($layerTitles[$currentLayer] =~ m/-?(silk|copper)/i) { $silk_or_copper = lc $1; } #substr($1, 0, 1);
     else #if ($silk_or_copper eq "")
     {
-        $silk_or_copper = scalar(keys %drillBody)? "copper": "silk"; #silk layer doesn't have holes
+        $silk_or_copper = (scalar(keys %drillBody) || $found_silk)? "copper": "silk"; #silk layer doesn't have holes, but if another layer is a silk layer, then treat this one as copper (in case SMD/copper only)
         $layerTitles[$currentLayer] .= "-$silk_or_copper";
     }
 #   distinguish top vs. bottom based on name or order (top expected before bottom unless PCB is 1-sided):
@@ -533,7 +549,7 @@ DebugPrint(sprintf("${\(CYAN)}Total input stream size: %.0fK, processing time: %
 #return value: none (uses globals)
 sub getfiles
 {
-    our ($numfiles_in, $multiContents, $outputDir, $grab_streams) = (0, "", "", 0); #initialize globals
+    our ($numfiles_in, $multiContents, $found_silk, $outputDir, $grab_streams) = (0, "", "", 0); #initialize globals
 #    my @missing_types = qw(top bottom silk); #in preferred order
 #    my %seen_types = (); #recognized layer types (purposes)
 #    foreach my $filename (@ARGV) #check which file types were given
@@ -626,23 +642,29 @@ sub getfiles
             $pdfContents =~ s/endstream/EMC/gs; #CAUTION: this might alter > 1
             $pdfContents =~ s/stream/BDC/gs;
 #            ++$layers_in_file;
-            pos($pdfContents) = 0; # Reset the match position to the beginning; #is this still needed?
+            pos($pdfContents) = 0; # Reset the match position to the beginning
             while ($pdfContents =~ m/BDC(.*?)EMC/gs) { ++$layers_in_file; }
-            DebugPrint("no layers; modified $layers_in_file streams to look like layers", 5);
+            DebugPrint("no layers; modified $layers_in_file stream(s) to look like layer(s)", 5);
         }
 
         # Get the layer titles
 #        my $numtitles = 0;
 #        while ($pdfContents =~ m/\/Title\((.|\\(?=\)))+?)\)/gs)
-        pos($pdfContents) = 0; # Reset the match position to the beginning; #is this still needed?
-        my $filename = basename($pdfFilePath); #use file name to annotate layer name if needed
+        my $filename = basename($pdfFilePath, ".pdf"); #use file name to annotate layer name if needed
+        if ($filename =~ m/-?silk/i) { $found_silk = TRUE; }
+        pos($pdfContents) = 0; # Reset the match position to the beginning
         while ($pdfContents =~ m/\/Title\(((\\\)|[^)])+?)\)/gs) #allow "\)" within title; can't seem to get negative look-behind working, so just use "|" on escaped ")"
         {
 #            my @title = split(/[\\\/]/, $1);
 #            my ($vol, $dir, $title) = File::Spec->splitpath($1);
 #            $title =~ s/^.*[\/\\]//; #drop Windows dir on Linux and vice versa (File::Spec seems to be platform-specific)
             my $title = basename($1);
-            if (($title !~ m/-?(top|bottom)/i) && ($filename =~ m/-?(top|bottom)/i)) { $title .= "-$1"; }
+            $title =~ s/^(ExpressPCB|xyz)//i; #drop hard-coded tool names
+            if ($title =~ m/-?silk/i) { $found_silk = TRUE; }
+            my $basename = $title;
+            $basename =~ s/-?(top|bottom|copper|silk|mask)//gi; #remove layer desc, see what's left
+            if ($basename !~ m/[a-z0-9]/i) { $title = "$filename$title"; $title =~ s/\s+/-/g; } #use real file name if layer just has desc
+            if (($title !~ m/-?(top|bottom)/i) && ($filename =~ m/-?(top|bottom)/i)) { $title .= "-$1"; } #restore layer desc
             if (($title !~ m/-?(silk|copper)/i) && ($filename =~ m/-?(silk|copper)/i)) { $title .= "-$1"; }
             WatchTypes($title);
 #            if ($projectTitle eq "") { $projectTitle = $title; } #use first title for project name
@@ -672,7 +694,7 @@ sub getfiles
         DebugPrint(sprintf("$numtitles = %d layers/titles kept so far: @layerTitles", scalar(@layerTitles)), 5);
 
         #check for page rotation:
-        pos($pdfContents) = 0; # Reset the match position to the beginning; #is this still needed?
+        pos($pdfContents) = 0; # Reset the match position to the beginning
         my $rot = ($pdfContents =~ m/\/Rotate (\d+)/)? $1: 0;
         if ($rot) { DebugPrint("page is rotated $rot deg\n", 3); }
         $pdfContents =~ s/BDC/BDC$rot\n/gs; #kludge: add rotation onto layer delimiter since the layer itself doesn't have a place for that info
@@ -793,10 +815,10 @@ sub ignore
 
 #    if ($line =~ m/^\s*$/) { return TRUE; } #empty line
     #these seem to be safe to ignore:
-    if ($line =~ m/\d+\si$/) { return TRUE; } #flatness tolerance
+    if ($line =~ m/\d+\si$/) { return "flatness tolerance"; } #flatness tolerance
 #    if ($line =~ m/\d+\sj$/i) { return TRUE; } #line join + cap styles
-    if ($line =~ m/\sgs$/i) { return TRUE; } #graphics state dictionary
-    if ($line =~ m/Q$/i) { return TRUE; } #save/restore graphics state
+    if ($line =~ m/\sgs$/i) { return "graphics state dictionary"; } #graphics state dictionary
+    if ($line =~ m/Q$/i) { return "graphics state save/restore"; } #save/restore graphics state
     
     return FALSE; #check for other commands
 }
@@ -1085,6 +1107,13 @@ sub drawshapes
         return TRUE;
     }
 
+    if ($line =~ m/^B$/) #fill-and-stroke
+    {
+        DebugPrint("fill-and-stroke: ignore fill and just stroke\n", 10);
+        $line = "S"; #kludge: just use fill logic
+#        return TRUE;
+    }
+
     if ($line =~ m/^S$/) #stroke: draw current path
     {
         # S means stroke what we just drew - only supported for circles
@@ -1107,14 +1136,13 @@ sub drawshapes
                 SetPolarity('s');
 #                our $body;
 #                $body .= "G04 here1\n";
-#                SetAperture('t', topshape(), $lastStrokeWeight + TRACE_ADJUST);
-                if ($lineStyle{'cap'} == CAP_ROUND) { SetAperture('t', topshape(), $lastStrokeWeight + TRACE_ADJUST); }
-                elsif ($lineStyle{'cap'} == CAP_SQUARE) { SetAperture('p', topshape(), $lastStrokeWeight + TRACE_ADJUST, $lastStrokeWeight + TRACE_ADJUST); }
-                else { mywarn("which aperture?"); }
+                SetAperture_shape('t', topshape(), $lastStrokeWeight + TRACE_ADJUST);
+#                if ($lineStyle{'cap'} == CAP_ROUND) { SetAperture('t', topshape(), $lastStrokeWeight + TRACE_ADJUST); }
+#                elsif ($lineStyle{'cap'} == CAP_SQUARE) { SetAperture('t', topshape(), $lastStrokeWeight + TRACE_ADJUST, $lastStrokeWeight + TRACE_ADJUST); }
+#                else { mywarn("which aperture?"); }
                 outline();
             }
-            my $num_shapes = $drawPath[-2];
-            if (popshape($num_shapes)) { next; }
+            if (popshape()) { next; }
             DebugPrint("failed to outline subpath\n", 5);
             @drawPath = ();
         }
@@ -1133,17 +1161,10 @@ sub drawshapes
             reduceRect(); #check if last 4 line segments in drawing path make a rect
             reduceCircle(); #check if last 4 curves in drawing path make a circle
             fill();
-            my $num_shapes = $drawPath[-2];
-            if (popshape($num_shapes)) { next; }
+            if (popshape()) { next; }
             DebugPrint("failed to fill subpath\n", 5);
             @drawPath = ();
         }
-        return TRUE;
-    }
-
-    if ($line =~ m/^B$/) #fill-and-stroke
-    {
-        DebugPrint("fill-and-stroke IGNORED\n", 10);
         return TRUE;
     }
 
@@ -1224,6 +1245,7 @@ sub outline
             #lastly, lengthen or shorten the polygon edges so the corners touch again (so polygon can be filled):
             #This is done by finding the intersection of the pair of equations through each corner.
             #There's probably a more efficient way, but this works and it isn't executed frequently.
+            #TODO: use line join style (round/square/butt)
             for (my ($i, $previ) = (-LINE_SHAPELEN * $drawPath[-2], -LINE_SHAPELEN); $i < 0; $previ = $i, $i += LINE_SHAPELEN)
             {
                 #given 2 points on a line, the line's equation is: y = (Y2 - Y1)/(X2 - X1)(x - X1) + Y1, or just x = X1 if the line is vertical
@@ -1316,7 +1338,7 @@ sub outline
 #return value: none (uses globals)
 sub fill
 {
-    our (@drawPath, %visibleFillColor, $lastStrokeWeight, $lastAperture, $body, $currentDrillAperture, %masks, %holes, %drillBody, $bez_warn); #globals
+    our (@drawPath, %visibleFillColor, %lineStyle, $lastStrokeWeight, $lastAperture, $body, $currentDrillAperture, %masks, %holes, %drillBody, $bez_warn); #globals
 
     if ($drawPath[-1] eq "rect") #fill a rect; NOTE: might be square/rect pad or ground plane; can't be a hole (holes are round)
     {
@@ -1326,7 +1348,8 @@ sub fill
         my ($minX, $minY, $maxX, $maxY) = (min($drawPath[-6], $drawPath[-4]), min($drawPath[-5], $drawPath[-3]), max($drawPath[-6], $drawPath[-4]), max($drawPath[-5], $drawPath[-3])); #use min/max in case rect is rendered backwards
 #        my ($minX, $minY, $maxX, $maxY) = ($drawPath[-6], $drawPath[-5], $drawPath[-4], $drawPath[-3]); #use min/max in case rect is rendered backwards
         my ($w, $h) = ($maxX - $minX, $maxY - $minY);
-        DebugPrint(sprintf("fill rect: size %5.5f x %5.5f, area (%4.4f, %4.4f) .. (%4.4f %4.4f), vis-f $visibleFillColor{'f'}, weight %5.5f \"$lastStrokeWeight\", use aperture? %d (max %5.5f)\n", inches($w), inches($h), inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY), inches($lastStrokeWeight), inches(min($w, $h)) <= MAX_APERTURE, inches(MAX_APERTURE)), 5);
+        my $is_square = (inches(abs($w - $h)) < TRACE_MINLEN); #($w == $h); #NOTE: need to use rounding to compensate for arithmetic errors
+        DebugPrint(sprintf("fill rect: size %5.5f x %5.5f, area (%4.4f, %4.4f) .. (%4.4f %4.4f), vis-f $visibleFillColor{'f'}, weight %5.5f \"$lastStrokeWeight\", use aperture? %d (max %5.5f, flash treshold %5.5f), w %s h, is square? %s\n", inches($w), inches($h), inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY), inches($lastStrokeWeight), inches(min($w, $h)) <= MAX_APERTURE, MAX_APERTURE, TRACE_MINLEN, ($w < $h)? "<": ($w > $h)? ">": "=", $is_square), 5);
 
         #use this code to always use rectangular apertures of any size:
         #SetAperture('x', $w + SQRPAD_ADJUST, $h + SQRPAD_ADJUST); #select smaller dimension as aperture size
@@ -1336,16 +1359,17 @@ sub fill
 
         if (!MAX_APERTURE || (inches(min($w, $h)) <= MAX_APERTURE)) #small enough to use aperture
         {
-            my $aper_size = min($w, $h) + (($w == $h)? SQRPAD_ADJUST: RECTPAD_ADJUST); #select smaller dimension as aperture size
-            SetAperture('p', topshape(), $aper_size, $aper_size); #or, use 'x' for exact size here?
+            my $aper_size = min($w, $h) + ($is_square? SQRPAD_ADJUST: RECTPAD_ADJUST); #select smaller dimension as aperture size
+            SetAperture('p', topshape(), $aper_size, $aper_size); #, $aper_size); #or, use 'x' for exact size here?
             my $masklen = length($body);
-            if ($w < $h) #drag aperture vertically
+#NOTE: very short traces don't seem to show up in ViewPlot and FlatCAM, so flash aperture instead
+            if (($w < $h) && !$is_square) #drag aperture vertically
             {
                 $body .= sprintf("X%sY%sD02*\n", inchesX(($minX + $maxX)/2, FALSE), inchesY($minY + $w/2, FALSE)); #move to starting point
                 $body .= sprintf("Y%sD01*\n", inchesY($maxY - $w/2, FALSE)); #draw to other end (X does not change)
                 DebugPrint(sprintf("draw vrect: use aperture $lastAperture %5.5f \"$w\" with line from (%5.5f, %5.5f) to (\", %5.5f), has mask? %d\n", inches($w), inchesX(($minX + $maxX)/2), inchesY($minY + $w/2), inchesY($maxY - $w/2), $visibleFillColor{'f'}), 5);
             }
-            elsif ($w > $h) #drag aperture horizontally
+            elsif (($w > $h) && !$is_square) #drag aperture horizontally
             {
                 $body .= sprintf("X%sY%sD02*\n", inchesX($minX + $h/2, FALSE), inchesY(($minY + $maxY)/2, FALSE)); #move to starting point
                 $body .= sprintf("X%sD01*\n", inchesX($maxX - $h/2, FALSE)); #draw to other end (Y does not change)
@@ -1487,11 +1511,13 @@ sub fill
         }
         #draw border first so it's smooth:
         SetPolarity('f');
-        SetAperture('f', topshape(), points(FILL_WIDTH), points(FILL_WIDTH)); #draw outline to preserve overall shape + size; use square aperture
+        SetAperture_shape('f', topshape(), points(FILL_WIDTH)); #draw outline to preserve overall shape + size
+#        if ($lineStyle{'cap'} == CAP_ROUND) { SetAperture('f', topshape(), points(FILL_WIDTH)); } #draw outline to preserve overall shape + size; use square aperture
+#        else { SetAperture('f', topshape(), points(FILL_WIDTH), points(FILL_WIDTH)); } #draw outline to preserve overall shape + size; use square aperture
         #line width is .01 centered on border, so move it a half-width toward center of circle to preserve overall circle size correctly
         outline(points(FILL_WIDTH)/2);
 
-        polyfill(@drawPath, -2, LINE_SHAPELEN);
+        polyfill(\@drawPath, -2, LINE_SHAPELEN);
         popshape($drawPath[-2] - 1); #kludge: caller will pop last line segment
         return TRUE;
     }
@@ -1499,7 +1525,7 @@ sub fill
     if ($drawPath[-1] eq "line") #fill a single line; what does this mean?  must be some graphics
     {
         SetPolarity('f');
-        SetAperture('f', topshape(), points(FILL_WIDTH), points(FILL_WIDTH)); #draw outline to preserve overall shape + size; use square aperture
+        SetAperture_shape('f', topshape(), points(FILL_WIDTH)); #, points(FILL_WIDTH)); #draw outline to preserve overall shape + size; use square aperture
 #        #line width is .01 centered on border, so move it a half-width toward center of circle to preserve overall circle size correctly
 #        outline(points(FILL_WIDTH)/2);
         outline(0); #no need to adjust center of a stand-alone line seg?
@@ -1523,7 +1549,7 @@ sub fill
         my @curve = $bez->curve(BEZIER_PRECISION); #list of (x,y) points along curve
 #        $diameter += RNDPAD_ADJUST; #compensate for rendering arithmetic errors
 #        DebugPrint(sprintf("fill circle: center (%4.4f, %4.4f) \"$drawPath[-5] $drawPath[-4]\", diameter %5.5f (adjusted to %5.5f), weight $lastStrokeWeight, vis-f $visibleFillColor{'f'}, use aperture? %d, to drill? %d, prev drill? %d\n", inchesX($centerX), inchesY($centerY), inches($drawPath[-3]), inches($diameter), inches($diameter) <= MAX_APERTURE, $ishole, exists($holes{$drillxy})), 5);
-        polyfill(@curve, 0, 2);
+        polyfill(\@curve, 0, 2);
         return TRUE;
     }
 
@@ -1536,21 +1562,22 @@ sub fill
 sub polyfill
 {
     our $body; #globals
-    my @drawPath = shift();
+    my @myPath = @{ shift() }; #get first param as array
     my $stofs = shift(); #-2
     my $stride = shift(); #6
+#    my ($myPath, $stofs, $stride) = @_; #coords, start ofs, stride
 
-    if (scalar(@drawPath) < 2) { return FALSE; } #avoid subscript error (short-circuit IF polyfill
+    if (scalar(@myPath) < 2) { return FALSE; } #avoid subscript error (short-circuit IF polyfill
     #determine bounding rect (used as limits for fill):
     my ($minX, $minY, $maxX, $maxY) = (0, 0, 0, 0); #initialize in case polygon is incomplete
-    for (my ($i, $first) = (-$stride * $drawPath[$stofs], TRUE); $i < 0; $i += $stride, $first = FALSE)
+    for (my ($i, $first) = (-$stride * $myPath[$stofs], TRUE); $i < 0; $i += $stride, $first = FALSE)
     {
-        $minX = min($first? $drawPath[$i + 0]: $minX, $drawPath[$i + 2]);
-        $minY = min($first? $drawPath[$i + 1]: $minY, $drawPath[$i + 3]);
-        $maxX = max($first? $drawPath[$i + 0]: $maxX, $drawPath[$i + 2]);
-        $maxY = max($first? $drawPath[$i + 1]: $maxY, $drawPath[$i + 3]);
+        $minX = min($first? $myPath[$i + 0]: $minX, $myPath[$i + 2]);
+        $minY = min($first? $myPath[$i + 1]: $minY, $myPath[$i + 3]);
+        $maxX = max($first? $myPath[$i + 0]: $maxX, $myPath[$i + 2]);
+        $maxY = max($first? $myPath[$i + 1]: $maxY, $myPath[$i + 3]);
     }
-    DebugPrint(sprintf("polygon: bounding rect (%5.5f, %5.5f) .. (%5.5f, %5.5f) \"$minX $minY $maxX $maxY\", $drawPath[-2] line segs\n", inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY)), 5);
+    DebugPrint(sprintf("polygon: bounding rect (%5.5f, %5.5f) .. (%5.5f, %5.5f) \"$minX $minY $maxX $maxY\", $myPath[-2] line segs\n", inchesX($minX), inchesY($minY), inchesX($maxX), inchesY($maxY)), 5);
 
     #now fill polygon by drawing parallel lines:
     #Based on 2007 code from Darel Rex Finley at http://alienryderflex.com/polygon_fill/
@@ -1561,10 +1588,10 @@ sub polyfill
     {
         #build a list of intersection points of current fill line with polygon sides:
         my @Xcrossing = ();
-        for (my $i = -$stride * $drawPath[$stofs]; $i < 0; $i += $stride)
+        for (my $i = -$stride * $myPath[$stofs]; $i < 0; $i += $stride)
         {
-            if ((min($drawPath[$i + 1], $drawPath[$i + 3]) >= $y) || (max($drawPath[$i + 1], $drawPath[$i + 3]) < $y)) { next; } #polygon side doesn't cross current fill line
-            my $x = $drawPath[$i] + ($y - $drawPath[$i + 1]) / ($drawPath[$i + 3] - $drawPath[$i + 1]) * ($drawPath[$i + 2] - $drawPath[$i + 0]); #intersection of test line with edge
+            if ((min($myPath[$i + 1], $myPath[$i + 3]) >= $y) || (max($myPath[$i + 1], $myPath[$i + 3]) < $y)) { next; } #polygon side doesn't cross current fill line
+            my $x = $myPath[$i] + ($y - $myPath[$i + 1]) / ($myPath[$i + 3] - $myPath[$i + 1]) * ($myPath[$i + 2] - $myPath[$i + 0]); #intersection of test line with edge
             push(@Xcrossing, $x);
         }
         if (!scalar(@Xcrossing)) { next; }
@@ -1843,6 +1870,7 @@ sub decompress
 #    while ($buf =~ m/<<.*?\/FlateDecode.*?>>\r?\n?stream\r?\n(.*?)endstream/mgs) #expand compressed streams; \r \n seems to be optional, or can occur multiple times
 #still not quite right, but closer to being correct:
 #CAUTION: found a space after "<< >>", so allow spaces at various places:
+    DebugPrint(sprintf("decompressing '$srcpath' (T+%f) ...", time() - $runtime), 8);
     while ($buf =~ m/<<.*?>>\s*\r?\n?stream\s*\r?\n(.*?)\s*\r?\n?\s*endstream/mgs) #expand compressed streams; \r \n seems to be optional, or can occur multiple times
     {
 #        DebugPrint("stream found\n", 1);
@@ -1893,7 +1921,9 @@ sub decompress
 #        DebugPrint(sprintf("found compressed seg, inlen %d, outlen %d, stat in: $instat, out: $outstat\n", length($compressed), length($decompressed)), 6);
 #        $buf = substr($buf, 0, $stofs) . "BDC0\r\n" . $decompressed . "\nEMC\r\n" . substr($buf, $enofs);
 #    }
+    DebugPrint(sprintf("... decompressed '$srcpath' (T+%f) ...", time() - $runtime), 8);
 
+    pos($buf) = 0; #reset regex search position
     if ($buf =~ m/\/FlateDecode/gs) { mywarn("parser didn't decompress stream; please report this problem!"); exit; } #sanity check; output will be useless if stream was not extracted correctly
     return $buf;
 }
@@ -1937,6 +1967,17 @@ sub SetPolarity
     $layerPolarity = $visibleFillColor{$which};
 }
 
+#set round or square aperture according to current line cap style:
+sub SetAperture_shape
+{
+    our %lineStyle; #globals
+    my ($type, $where, $size) = @_;
+
+    return ($lineStyle{'cap'} == CAP_ROUND)? SetAperture($type, $where, $size): #use round aperture
+        ($lineStyle{'cap'} == CAP_SQUARE)? SetAperture($type, $where, $size, $size): #use square aperture
+        mywarn("which aperture $lineStyle{'cap'}?");
+}
+
 #select new aperture:
 #modified to only issue tool command if needed
 #modified to handle rectangular apertures
@@ -1953,20 +1994,22 @@ sub SetAperture #GetAperture
     my $where = shift(); #for debug only
     # Get the number to convert
     my $input = shift(); #(@_);
+#    my ($wanttype, $where, $input) = @_;
     # Convert it to inches
     my $inches = inches($input);
+    my $override = CAP_OVERRIDE? "cap style": "caller";
 
     my $want_round = !scalar(@_); #extra param passed for rect
     if (($wanttype ne "m") && $want_round && ($lineStyle{'cap'} != CAP_ROUND))
     {
-        mywarn("caller wants round aperture at $where, but line cap style is square");
-        $want_round = FALSE; #override caller
+        mywarn("caller wants round aperture at $where, but line cap style is square: ${override} overrides");
+        if (CAP_OVERRIDE) { $want_round = FALSE; } #override caller
         unshift(@_, $inches);
     }
     elsif (($wanttype ne "m") && !$want_round && ($lineStyle{'cap'} == CAP_ROUND))
     {
-        mywarn("caller wants rect aperture at $where, but line cap style is round");
-        $want_round = TRUE; #override caller
+        mywarn("caller wants rect aperture at $where, but line cap style is round: ${override} overrides");
+        if (CAP_OVERRIDE) { $want_round = TRUE; } #override caller
     }
 #DebugPrint("SetApert: type $wanttype, want size $input => inches $inches\n", 5);
 #TODO: use line cap style to choose square vs. round?
@@ -2045,6 +2088,7 @@ sub StandardTool
     my ($wanttype, $size) = @_;
 
     if ($wanttype eq 'x') { return $size; } #no mapping, use exact size
+    DebugPrint("std tool: want type $wanttype, want size $size", 18);
     for (my ($i, $wantsize, $bestdelta) = (0, $size, MAXINT); $i < scalar((TOOL_SIZES)); ++$i)
     {
         my $tooltype = ((TOOL_SIZES)[$i] < 0)? 'h': ($i + 1 >= scalar((TOOL_SIZES)))? 't': ((TOOL_SIZES)[$i + 1] > 0)? 't': 'p'; #pad sizes (+ve) are followed by a drill size (-ve)
@@ -2053,11 +2097,12 @@ sub StandardTool
         elsif (($wanttype eq 'f') && ($tooltype eq 'h')) { next; } #fill can use any aperture, but not drill tools
         my $delta = abs($wantsize - abs((TOOL_SIZES)[$i]));
         if ($delta >= $bestdelta) { next; } #no better than current choice
-        DebugPrint(sprintf("check tool[$i/%d]: size %5.5f, delta %5.5f from requested size %5.5f, type $tooltype, wanted $wanttype\n", scalar((TOOL_SIZES)), abs((TOOL_SIZES)[$i]), $delta, $wantsize), 18);
+        DebugPrint(sprintf("check tool[$i/%d]: type $tooltype, size %5.5f, delta %5.5f from requested size %5.5f, best %5.5f, type $tooltype, wanted $wanttype, keep? %s\n", scalar((TOOL_SIZES)), abs((TOOL_SIZES)[$i]), $delta, $wantsize, $bestdelta, $delta < $bestdelta), 18);
         ($size, $bestdelta) = (abs((TOOL_SIZES)[$i]), $delta);
         if (!$delta) { last; } #exact match; won't find anything better than this so stop looking
     }
     if ($wanttype eq 'm') { $size += SOLDER_MARGIN; } #enlarge pad for mask
+    DebugPrint("std tool: chose tool size $size", 18);
     return $size;
 }
 
@@ -2182,7 +2227,7 @@ sub solder
 {
     our (%holes, %masks, %visibleFillColor, $lastAperture, %apertures, $body); #globals
 
-    my $desc = shift(); #top/bottom
+    my ($desc) = @_; #shift(); #top/bottom
     if (!scalar(keys %masks)) { return; }
 
     ($body, %apertures) = ("", ());
@@ -2217,7 +2262,7 @@ sub edges
     ($body, %apertures) = ("", ());
 
     if ($lineStyle{'cap'} == CAP_ROUND) { SetAperture('x', "outline", 1); }
-    if ($lineStyle{'cap'} == CAP_SQUARE) { SetAperture('x', "outline", 1, 1); }
+    else { SetAperture('x', "outline", 1, 1); }
     @drawPath = ($pcbLayout{'xmin'}, $pcbLayout{'ymin'}, $pcbLayout{'xmax'}, $pcbLayout{'ymax'}, 1, "rect");
     if ($is_AI) #don't translate outline for AI
     {
@@ -2405,8 +2450,8 @@ sub stripNoise
 #return value: filename with suggested extension
 sub GerbExt
 {
-#    my ($filename) = @_; #shift();
-    my $filename = shift();
+    my ($filename) = @_; #shift();
+#    my $filename = shift();
 
     if ($filename =~ m/copper/i)
     {
@@ -2569,16 +2614,16 @@ sub tenths
 
 
 #return base part of a file name:
-sub basename
-{
-#    my ($filename) = @_;
-    my @filename = split /[\\\/]+/, shift(); #$filename;
-#            my ($vol, $dir, $title) = File::Spec->splitpath($1);
-#            $title =~ s/^.*[\/\\]//; #drop Windows dir on Linux and vice versa (File::Spec seems to be platform-specific)
-#for my $n (@filename) { print STDERR $n, "\n"; }
-    $filename[-1] =~ s/\.[a-z]{3,4}$//i; #drop file extension
-    return $filename[-1];
-}
+#sub basename
+#{
+##    my ($filename) = @_;
+#    my @filename = split /[\\\/]+/, shift(); #$filename;
+##            my ($vol, $dir, $title) = File::Spec->splitpath($1);
+##            $title =~ s/^.*[\/\\]//; #drop Windows dir on Linux and vice versa (File::Spec seems to be platform-specific)
+##for my $n (@filename) { print STDERR $n, "\n"; }
+#    $filename[-1] =~ s/\.[a-z]{3,4}$//i; #drop file extension
+#    return $filename[-1];
+#}
 
 
 #show an error/warning message:
@@ -2630,12 +2675,12 @@ sub DebugPrint
         if (-t STDOUT) { print STDOUT uncolor(BLUE), $msg, "\n", uncolor(RESET); } #to screen #"$msg $from\n"
         else { print STDOUT colorstrip($msg), "\n"; } #to file
     }
-    if (GERBER_DEBUG >= $level) { $body .= "G04 $msg $from*\n"; }
+    if (GERBER_DEBUG >= $level) { $msg = colorstrip($msg); $body .= "G04 $msg $from*\n"; }
 }
 
 sub uncolor
 {
-    my $msg = shift();
+    my ($msg) = @_; #shift();
     return WANT_COLORS? $msg: colorstrip($msg);
 }
 
