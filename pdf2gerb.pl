@@ -549,7 +549,7 @@ DebugPrint(sprintf("${\(CYAN)}Total input stream size: %.0fK, processing time: %
 #return value: none (uses globals)
 sub getfiles
 {
-    our ($numfiles_in, $multiContents, $found_silk, $outputDir, $grab_streams) = (0, "", "", 0); #initialize globals
+    our ($numfiles_in, $multiContents, $found_silk, $outputDir, $grab_streams) = (0, "", FALSE, "", 0); #initialize globals
 #    my @missing_types = qw(top bottom silk); #in preferred order
 #    my %seen_types = (); #recognized layer types (purposes)
 #    foreach my $filename (@ARGV) #check which file types were given
@@ -1895,7 +1895,7 @@ sub decompress
         my ($df, $instat) = inflateInit();
         my ($decompressed, $outstat) = $df->inflate($compressed);
         DebugPrint("stream outlen: " . length($decompressed) . ", stat in: $instat, out: $outstat\n", 6);
-        if ($decompressed =~ m/[^\r\n\x20-\x7e]/) { mywarn("decompressed stream still has junk chars @ $-[0]", 1); }
+        if ($decompressed =~ m/[^\r\n\x20-\x7e]/) { my $bad_char = ord(substr($decompressed, $-[0], 1)); mywarn("decompressed stream still has junk char @ $-[0]: $bad_char", 1); }
         if (WANT_STREAMS) #save decompressed stream to text file (for easier debug)
         {
             my ($vol, $dir, $srcfile) = File::Spec->splitpath($srcpath);
