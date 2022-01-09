@@ -1,0 +1,13 @@
+Linux 1/8/22 notes:
+- still works 10 years later :)
+- Windows apps such as ExpressPCB work okay with Wine - just download and install.
+- need a PDF printer - "sudo apt install printer-driver-cups-pdf" and "mkdir ~/PDF"
+- print top, bottom, silk separately to PDF, no color no header/footer
+- get latest pdf2gerb from https://github.com/swannman/pdf2gerb/
+- to remove CR use command: sed 's/\r$//' pdf2gerb.pl > pdf2gerb-noCR.pl
+- get pdf2gerb_cfg.pm as well, put in current folder; set PANELIZE.overhangs = FALSE, comment out unneded TOOL_SIZES for more accurate rendering
+- typical command: ./pdf2gerb.pl ./*top.pdf ./*bottom.pdf ./*silk.pdf
+- in GerbView, set top copper color to (255,0,0), bottom copper to (0,192,0), silk + outline to (255,255,0) to match CAD tools like ExpressPCB
+- need to select all file types in order to open the DRD file in GerbView, delete G04 comment at top of DRD file
+- might need to rename DRD to XLN when submitting files to fab shop
+
